@@ -1,0 +1,11 @@
+*.bin
+*.exe
+.vscode
+*.log
+*.elf
+*.map
+*.list
+*.mp4
+*.obj
+.venv
+.metadata/
