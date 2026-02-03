@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "oled.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -64,6 +64,8 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+	uint8_t sbuf[15] = "Hello World!\n\r";
+	uint8_t *OLED_buf;
 
   /* USER CODE END 1 */
 
