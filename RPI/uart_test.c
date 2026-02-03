@@ -15,6 +15,64 @@
  * processes it into a hardcoded command list (simulating pathfinding),
  * and sends the commands to the physical STM32 serial port.
  */
+/*
+ * ==============================================================================
+ * HOW TO USE THIS TEST SCRIPT
+ * ==============================================================================
+ * This script verifies the message forwarding path from a simulated Android
+ * input to the physical STM32 serial port.
+ *
+ * REQUIREMENTS:
+ * - Raspberry Pi running Bookworm OS (or similar Linux).
+ * - fake_android_client.c (must be compiled: `gcc -o fake_android_client fake_android_client.c -Wall`)
+ * - rpi_hal.c (linked during compilation)
+ * - PC with a serial monitoring application (e.g., PuTTY, Arduino Serial Monitor).
+ * - USB cable to connect RPi's STM serial port to your PC.
+ *
+ * ------------------------------------------------------------------------------
+ * STEP 1: Connect Hardware & Prepare PC
+ * ------------------------------------------------------------------------------
+ * a. Connect your RPi's STM serial port (/dev/ttyACM0) via USB to your PC.
+ * b. On your PC, open a serial monitoring application.
+ * c. Configure the serial monitor:
+ *    - Port: The COM port that your RPi appears as (e.g., COM3 on Windows).
+ *    - Baud Rate: 115200
+ *    - Data Bits: 8, Parity: None, Stop Bits: 1, Flow Control: None.
+ *
+ * ------------------------------------------------------------------------------
+ * STEP 2: Compile This Script
+ * ------------------------------------------------------------------------------
+ * On your Raspberry Pi, navigate to your project directory.
+ * Compile this script, linking with `rpi_hal.c`:
+ *   gcc -o uart_test uart_test.c rpi_hal.c -I. -lcurl -Wall
+ *
+ * ------------------------------------------------------------------------------
+ * STEP 3: Run the Test (Requires Two RPi Terminals)
+ * ------------------------------------------------------------------------------
+ * Open two separate SSH terminals from your PC to your Raspberry Pi.
+ *
+ * RPi Terminal 1: Run the `uart_test` program. It will wait for a trigger.
+ *   sudo ./uart_test
+ *   (This terminal will show "Waiting for a mission command...")
+ *
+ * RPi Terminal 2: Run the `fake_android_client` to send the trigger.
+ *   ./fake_android_client
+ *
+ * ------------------------------------------------------------------------------
+ * EXPECTED OUTCOME:
+ * ------------------------------------------------------------------------------
+ * - RPi Terminal 1: Will un-pause, show "Received mission command...", and then
+ *   print logs indicating commands are being sent ("Sending command X/Y to STM port...").
+ * - PC Serial Monitor: Will display the actual robot commands, one per second:
+ *   FWD,5000,200;
+ *   TURNL,4000,45;
+ *   FWD,5000,150;
+ *   TURNR,4000,90;
+ *   FWD,5000,100;
+ *
+ * This confirms the full message-forwarding path from a simulated Android input
+ * to the physical USART port is working correctly.
+ */
 int main() {
     printf("--- Starting Message-Forwarding UART Test ---\n");
 
@@ -45,6 +103,10 @@ int main() {
 
     // --- Part 2: Initialize Physical UART and Send Commands ---
     printf("--- Mission Received. Initializing Physical UART ---\n");
+    // Note on STM32_DEVICE (/dev/ttyACM0):
+    // This typically refers to the first USB-connected serial device (USB CDC ACM).
+    // The specific physical USB port on the Raspberry Pi usually does not matter
+    // for its assignment as /dev/ttyACM0, especially if it's the only such device connected.
     int stm32_fd = init_serial_port(STM32_DEVICE, BAUD_RATE);
 
     if (stm32_fd == -1) {
