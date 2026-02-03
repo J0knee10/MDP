@@ -231,8 +231,8 @@ int send_command_to_stm32(int fd, Command command) {
 
 int capture_image(const char* filename) {
     char command[256];
-    // Use rpicam-still for Bookworm OS. Arguments are different.
-    snprintf(command, sizeof(command), "rpicam-still --nopreview -t 200 --width 640 --height 480 -o %s", filename);
+    // Use raspistill for Buster OS compatibility. Arguments are slightly different.
+    snprintf(command, sizeof(command), "raspistill -n -t 200 -w 640 -h 480 -o %s", filename);
     int result = system(command);
     if (result == 0) {
         printf("[Camera] Image captured: %s\n", filename);
