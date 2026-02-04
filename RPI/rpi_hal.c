@@ -58,6 +58,15 @@ int init_serial_port(const char* device, int baud_rate) {
         perror("init_serial_port: Unable to open device");
         return -1;
     }
+
+#ifdef RPI_TESTING
+    // For named pipes, termios settings are not applicable.
+    // We just need the file descriptor.
+    fcntl(fd, F_SETFL, 0); // Ensure blocking write for named pipes
+    printf("Named pipe %s opened successfully for testing.\n", device);
+    return fd;
+#else
+    // For real serial ports, apply termios settings
     fcntl(fd, F_SETFL, 0); // Set to blocking mode
 
     struct termios options;
@@ -86,6 +95,7 @@ int init_serial_port(const char* device, int baud_rate) {
 
     printf("Serial port %s initialized successfully.\n", device);
     return fd;
+#endif
 }
 
 // --- Android Communication ---
@@ -230,15 +240,38 @@ int send_command_to_stm32(int fd, Command command) {
 // --- Camera/Image Processing ---
 
 int capture_image(const char* filename) {
+#ifdef RPI_TESTING
+    printf("[Camera] (TEST MODE) Faking image capture: %s\n", filename);
+    // Create a dummy file for testing purposes
+    FILE* fp = fopen(filename, "w");
+    if (fp) {
+        // Write a minimal valid JPEG header (or just some dummy content)
+        // This is a very simplified placeholder. A real dummy JPEG would be larger.
+        // For testing the *flow*, an empty file or a small dummy is usually enough.
+        fprintf(fp, "Fake JPEG content for %s", filename); 
+        fclose(fp);
+        return 0; // Success
+    } else {
+        fprintf(stderr, "[Camera] (TEST MODE) Failed to create dummy image file.\n");
+        return -1; // Failure
+    }
+#else
     char command[256];
     // Use raspistill for Buster OS compatibility. Arguments are slightly different.
+    // -n: No preview
+    // -t 200: Take picture after 200ms delay (gives camera time to adjust)
+    // -w 640 -h 480: Set resolution
+    // -o: Output file
     snprintf(command, sizeof(command), "raspistill -n -t 200 -w 640 -h 480 -o %s", filename);
+    printf("[Camera] Executing command: %s\n", command);
     int result = system(command);
     if (result == 0) {
         printf("[Camera] Image captured: %s\n", filename);
     } else {
-        fprintf(stderr, "[Camera] Failed to capture image.\n");
+        fprintf(stderr, "[Camera] Failed to capture image. Error code: %d\n", result);
     }
     return result;
+#endif
 }
+
 

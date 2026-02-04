@@ -27,9 +27,8 @@ class FakeImageServer(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            # Return a fake image ID (e.g., Obstacle 1 -> Image 11, Obstacle 2 -> Image 12)
-            recognized_id = 10 + int(obstacle_id)
-            response = f'{{"img_id": {recognized_id}}}'
+            # Return an explicit ACK
+            response = f'{{"status": "ACK"}}'
             
             self.wfile.write(response.encode('utf-8'))
             print(f"[Fake Img Server] Sent response: {response}")

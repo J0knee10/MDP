@@ -12,15 +12,16 @@
 #ifdef RPI_TESTING
 const char* STM32_DEVICE = "rpi_to_stm";
 const char* ANDROID_DEVICE = "android_to_rpi";
+const char* PATHFINDING_SERVER_URL = "http://127.0.0.1:4000/path";
+const char* IMAGE_SERVER_URL = "http://127.0.0.1:5000/detect"; 
 #else
 const char* STM32_DEVICE = "/dev/ttyACM0";
 const char* ANDROID_DEVICE = "/dev/rfcomm0";
+const char* PATHFINDING_SERVER_URL = "http://192.168.7.230:4000/path";
+const char* IMAGE_SERVER_URL = "http://192.168.7.113:5000/detect";
 #endif
 
 const int BAUD_RATE = 115200;
-
-const char* PATHFINDING_SERVER_URL = "http://192.168.7.230:4000/path";
-const char* IMAGE_SERVER_URL = "http://192.168.7.113:5000/detect";
 const char* CAPTURE_FILENAME = "capture.jpg";
 
 // --- Global Shared Application Context ---
@@ -36,8 +37,11 @@ static int post_image_to_server_thread(int obstacle_id, char* response_buffer, i
     int result = -1;
 
     struct MemoryStruct { char *memory; size_t size; } chunk = { .memory = malloc(1), .size = 0 };
+    if (chunk.memory == NULL) { // Check for malloc failure
+        fprintf(stderr, "[ImgThread] Failed to allocate memory for CURL response.\n");
+        return -1;
+    }
 
-    curl_global_init(CURL_GLOBAL_ALL);
     curl = curl_easy_init();
     if (curl) {
         curl_mime *form = curl_mime_init(curl);
@@ -57,35 +61,36 @@ static int post_image_to_server_thread(int obstacle_id, char* response_buffer, i
         if (res == CURLE_OK) {
             long code; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
             if (code >= 200 && code < 300) {
-                strncpy(response_buffer, chunk.memory, buffer_size - 1);
-                response_buffer[buffer_size - 1] = '\0';
+                if (response_buffer != NULL && chunk.memory != NULL) { // Only copy if buffer provided and memory exists
+                    strncpy(response_buffer, chunk.memory, buffer_size - 1);
+                    response_buffer[buffer_size - 1] = '\0';
+                }
                 result = 0;
             }
+        } else {
+            fprintf(stderr, "[ImgThread] post_image_to_server_thread failed: %s\n", curl_easy_strerror(res));
         }
         curl_easy_cleanup(curl);
         curl_mime_free(form);
+    } else {
+        fprintf(stderr, "[ImgThread] curl_easy_init() failed.\n");
     }
-    free(chunk.memory);
-    curl_global_cleanup();
+    free(chunk.memory); // Free after curl_easy_cleanup
     return result;
 }
 
 void* process_image_thread(void* args) {
     ImageTaskArgs* task_args = (ImageTaskArgs*)args;
-    int recognized_image_id = -1;
 
     printf("[ImgThread] Capturing image for obstacle %d...\n", task_args->obstacle_id);
     if (capture_image(CAPTURE_FILENAME) != 0) {
         fprintf(stderr, "[ImgThread] Failed to capture image.\n");
     } else {
-        char server_response[1024];
-        if (post_image_to_server_thread(task_args->obstacle_id, server_response, sizeof(server_response)) == 0) {
-            char* found = strstr(server_response, "\"img_id\":");
-            if (found) recognized_image_id = atoi(found + strlen("\"img_id\":"));
-            printf("[ImgThread] Recognized ID: %d. Sending result to Android.\n", recognized_image_id);
-            send_image_result_to_android(task_args->context->android_fd, task_args->obstacle_id, recognized_image_id);
+        // The PC will handle displaying the processed image.
+        if (post_image_to_server_thread(task_args->obstacle_id, NULL, 0) == 0) {
+            printf("[ImgThread] ACK received from image server for obstacle %d.\n", task_args->obstacle_id);
         } else {
-            fprintf(stderr, "[ImgThread] Failed to upload image.\n");
+            fprintf(stderr, "[ImgThread] Failed to upload image or no ACK received.\n");
         }
     }
     free(task_args); // Free the dynamically allocated arguments
@@ -231,6 +236,7 @@ void* android_listener_thread(void* args) {
 // =================================================================================
 
 int main() {
+    curl_global_init(CURL_GLOBAL_ALL); // Initialize curl once for the application lifecycle
     memset(&g_app_context, 0, sizeof(SharedAppContext));
     pthread_mutex_init(&g_app_context.lock, NULL);
     pthread_cond_init(&g_app_context.new_task_cond, NULL);
@@ -258,6 +264,7 @@ int main() {
     close(g_app_context.stm32_fd);
     close(g_app_context.android_fd);
 
+    curl_global_cleanup(); // Clean up curl once at application shutdown
     return 0;
 }
 
@@ -273,7 +280,7 @@ int main() {
  * --- STEP 1: Install Dependencies ---
  *
  *   sudo apt-get update
- *   sudo apt-get install libcurl4-openssl-dev bluetooth bluez python3
+ *   sudo apt-get install libcurl4-openssl-dev bluetooth bluez python3 libraspicam-dev
  *
  *
  * --- STEP 2: Configure Bluetooth (for live runs) ---
