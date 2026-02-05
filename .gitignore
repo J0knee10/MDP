@@ -9,3 +9,15 @@
 *.obj
 .venv
 .metadata/
+*.obj
+*.o
+*.d
+*.su
+*.cyclo
+*.hex
+*.axf
+*.crf
+*.htm
+*.mkd
+*.mk
+.venv

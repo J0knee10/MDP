@@ -208,30 +208,38 @@ int parse_command_route_from_server(const char* json_string, Command commands[],
 
 int send_command_to_stm32(int fd, Command command) {
     char stm_command[64];
-    const int MOVE_SPEED_PWM = 5000; // A default PWM value for forward movement
-    const int TURN_SPEED_PWM = 4000; // A default PWM value for turning
+    static uint32_t cmd_id_counter = 0; // Static to maintain ID across calls
+    const int DEFAULT_MOVE_SPEED_PERCENTAGE = 70; // 70% speed (will be * 71 on STM32)
+    const int DEFAULT_TURN_SPEED_PERCENTAGE = 60; // 60% speed (will be * 71 on STM32)
+
+    cmd_id_counter++; // Increment for each new command
 
     switch (command.type) {
         case CMD_MOVE_FORWARD:
-            // Format based on STM32 code: "FWD,speed,distance;"
-            snprintf(stm_command, sizeof(stm_command), "FWD,%d,%d;", MOVE_SPEED_PWM, command.value);
+            // STM32 format: :<cmdid>/MOTOR/FWD/<param1Speed>/<param2DistAngle>;
+            snprintf(stm_command, sizeof(stm_command), \":%lu/MOTOR/FWD/%d/%d;\", 
+                     cmd_id_counter, DEFAULT_MOVE_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_TURN_LEFT:
-            // Format based on STM32 code: "TURNL,speed,angle;"
-            snprintf(stm_command, sizeof(stm_command), "TURNL,%d,%d;", TURN_SPEED_PWM, command.value);
+            // STM32 format: :<cmdid>/MOTOR/TURNL/<param1Speed>/<param2DistAngle>;
+            snprintf(stm_command, sizeof(stm_command), \":%lu/MOTOR/TURNL/%d/%d;\", 
+                     cmd_id_counter, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_TURN_RIGHT:
-            // Format based on STM32 code: "TURNR,speed,angle;"
-            snprintf(stm_command, sizeof(stm_command), "TURNR,%d,%d;", TURN_SPEED_PWM, command.value);
+            // STM32 format: :<cmdid>/MOTOR/TURNR/<param1Speed>/<param2DistAngle>;
+            snprintf(stm_command, sizeof(stm_command), \":%lu/MOTOR/TURNR/%d/%d;\", 
+                     cmd_id_counter, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_SNAPSHOT:
             // Snapshots are handled by the RPi itself and are not sent to the STM32.
-            return 0;
+            // For now, these are not commands for the STM32.
+            printf(\"[To STM32]: Skipping snapshot command (handled by RPi).\\n\");
+            return 0; // Indicate success but no command sent to STM32
         default:
-            fprintf(stderr, "send_command_to_stm32: Unknown command type\n");
+            fprintf(stderr, \"send_command_to_stm32: Unknown command type\\n\");
             return -1; // Unknown command
     }
-    printf("[To STM32]: %s\n", stm_command);
+    printf(\"[To STM32]: %s\\n\", stm_command);
 
     // write_to_serial sends the exact string, which is what the STM32 expects (terminated by ';')
     return write_to_serial(fd, stm_command);

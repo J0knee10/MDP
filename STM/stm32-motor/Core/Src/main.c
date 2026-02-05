@@ -25,9 +25,10 @@
 #include "oled.h"
 #include "math.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include "queue.h"
 #include "ir_sensor.h"   // our PC6/PC9 sensor helpers
-#include "oled.h"        // your SSD1306 driver
+#include <string.h>        // your SSD1306 driver
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -65,6 +66,12 @@ typedef struct {
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define ICM20948_I2C_ADDR   (0x68 << 1)
+#define AK09916_I2C_ADDR    (0x0C << 1) // AK09916's I2C address is 0x0C
+#define AK09916_ST1_REG     0x10        // Status 1 Register
+#define AK09916_HXL_REG     0x11        // X-axis magnetic data, lower byte
+#define AK09916_ST2_REG     0x18        // Status 2 Register
+#define AK09916_CNTL2_REG   0x31        // Control 2 Register
+
 #define SERVO_CENTER 152
 #define SERVO_CENTER_A 145
 #define SERVO_CENTER_A_PERCENTAGE 30
@@ -371,6 +378,10 @@ volatile uint8_t buf4[256] = {0};
 
 // IMU
 volatile float gyro_z_dps = 0.0f;
+volatile float complementary_filter_angle = 0.0f; // Global to store the fused angle
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
 
 // BGM
 volatile enum {MUTE, BGM, CAPTURE, DONE} music = MUTE;
@@ -403,6 +414,8 @@ const float WHEEL_CIRCUMFERENCE_CM = 6.5f*3.14f;
 const PID_Controller defaultPid = {1.0f, 0.8f, 0.15f, 0, 0, 200, 0, 0};
 volatile PID_Controller pidA = defaultPid;
 volatile PID_Controller pidB = defaultPid;
+
+volatile int16_t magX, magY, magZ; // Raw magnetometer readings
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -2721,15 +2734,8 @@ uint8_t task2Loop(MotorCommand_t cmd, uint8_t isStateChanged){
 	                case 0: { // TURN phase
 	                    // Calculate current position
 	                    float current_x = x/10.0f - 2.0f;
-	                    float current_y;
-
-	                    if(capture2 == 1) {
-	                        // Top path
-	                        current_y = y/2.0f + 12.0f;
-	                    } else { // capture2 == 2
-	                        // Bottom path
-	                        current_y = y/2.0f - 12.0f;
-	                    }
+	                    float current_y = y/10.0f; // changed y/2.0f to y/10.0f, and removed +12.0f and -12.0f from if/else for capture2==1/2.
+	                    // Assuming that the coordinates are in cm, y was previously in mm.
 
 	                    // Calculate displacement to target (30, 20)
 	                    float delta_x = 30.0f - current_x;
@@ -3997,122 +4003,106 @@ void show(void *argument)
 
 /* USER CODE BEGIN Header_motor */
 /**
-* @brief Function implementing the motorTask thread.
-* @param argument: Not used
-* @retval None
-*/
+  * @brief  Function implementing the motorTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
 /* USER CODE END Header_motor */
 void motor(void *argument)
 {
   /* USER CODE BEGIN motor */
-  MotorCommand_t cmd;
-  uint8_t ack[50] = {0};
-  setServoAngle(SERVO_RIGHT_MAX);
-  osDelay(500);
-  setServoAngle(SERVO_CENTER);
-  osDelay(500);
-  enum {FWD,REV,STOP,TURNL,TURNR, TURN90L, TURN90R, TASK2} currentState = STOP;
-  uint8_t isStateChanged = 0;
-  while(isContinue) {
-	  if(xQueueReceive(motorCommandQueue, &cmd, 0) == pdPASS){
-		  currentState = cmd.command;
-		  isStateChanged = 1;
-	  }else{
-		  isStateChanged = 0;
-	  }
-	  if(currentState != STOP && music == MUTE && isContinue) music=BGM;
-	  switch(currentState) {
-	  if(isContinue==0) currentState = STOP;
-	  case FWD:
-		  if(motorPidForward(cmd, isStateChanged)) {
-			  currentState = STOP;
-			  motorStop();
-			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
-			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-		  }
-		  break;
-	  case REV:
-		  if(motorPidReverse(cmd, isStateChanged)) {
-		  	currentState = STOP;
-		  	motorStop();
-		  	sprintf(ack, "!%d/DONE;",cmd.cmdId);
-		  	HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-		  }
-		  break;
-	  case TURN90L:
-		  if(motorTurn90L(cmd, isStateChanged)){
-		  	currentState = STOP;
-		  	motorStop();
-		  	sprintf(ack, "!%d/DONE;",cmd.cmdId);
-		  	HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-		  }
-		  break;
-	  case TURN90R:
-		  if(motorTurn90R(cmd, isStateChanged)){
-			  currentState = STOP;
-			  motorStop();
-			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
-			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-		  }
-		  break;
-	  case TASK2:
-		  if(task2Loop(cmd, isStateChanged)){
-			  currentState = STOP;
-			  motorStop();
-			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
-			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-		  }
-		  break;
-	  case PWMTURNL:
-		  if(motorTurnPwmL(cmd, isStateChanged)){
-			  currentState = STOP;
-			  motorStop();
-			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
-			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-		  }
-		  break;
-	  case PWMTURNR:
-	  	  if(motorTurnPwmR(cmd, isStateChanged)){
-	  		  currentState = STOP;
-	  		  motorStop();
-	  		  sprintf(ack, "!%d/DONE;",cmd.cmdId);
-	  		  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-	  	  }
-	  	  break;
-	  case TURNL:
-		  if(motorTurn(cmd, isStateChanged)){
-			  currentState = STOP;
-			  motorStop();
-			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
-			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-		  }
-		  break;
-	  case TURNR:
-	  	  if(motorTurn(cmd, isStateChanged)){
-	  		  currentState = STOP;
-	  		  motorStop();
-	  		  sprintf(ack, "!%d/DONE;",cmd.cmdId);
-	  		  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-	  	  }
-	  	  break;
-	  case STOP:
-		  if(isStateChanged){
-			  isFrontCalib = 0;
-			  isTurning = 0;
-			  motorStop();
-			  if(cmd.command == STOP){
-				  sprintf(ack, "!%d/DONE;",cmd.cmdId);
-				  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
-			  }
-		  }
-	  }
-	  osDelay(1);
+  MotorCommand_t rxCmd;
+  static MotorCommandF_t fwdCmd;
+  fwdCmd.cmdId = 0;
+  static uint8_t isStateChanged = 1;
+  /* Infinite loop */
+  for(;;)
+  {
+	// Check for new command
+	if(xQueueReceive(motorCommandQueue, &rxCmd, 0) == pdPASS) {
+		isStateChanged = 1; // Mark that state has changed
+		sprintf(buf, "%d %d %d", rxCmd.command, rxCmd.param1Speed, rxCmd.param2DistAngle);
+	}else{
+		isStateChanged = 0;
+	}
+
+    switch(rxCmd.command){
+    case FWD:
+    	fwdCmd.command = FWD;
+    	fwdCmd.param1Speed = rxCmd.param1Speed;
+    	fwdCmd.param2DistAngle = rxCmd.param2DistAngle;
+    	if(motorPidForwardF(fwdCmd, isStateChanged)) {
+    		rxCmd.command = STOP;
+    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/FWD_COMPLETE;",0xFFFF,0xFFFF);
+    	}
+    	break;
+    case REV:
+    	fwdCmd.command = REV;
+    	fwdCmd.param1Speed = rxCmd.param1Speed;
+    	fwdCmd.param2DistAngle = rxCmd.param2DistAngle;
+    	if(motorPidReverseF(fwdCmd, isStateChanged)) {
+    		rxCmd.command = STOP;
+    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/REV_COMPLETE;",0xFFFF,0xFFFF);
+    	}
+    	break;
+    case STOP:
+    	motorStop();
+    	HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/STOP_COMPLETE;",0xFFFF,0xFFFF);
+    	break;
+    case TURNL:
+    	fwdCmd.command = TURNL;
+    	fwdCmd.param1Speed = rxCmd.param1Speed;
+    	fwdCmd.param2DistAngle = rxCmd.param2DistAngle;
+    	if(motorTurnF(fwdCmd, isStateChanged)) {
+    		rxCmd.command = STOP;
+    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TURNL_COMPLETE;",0xFFFF,0xFFFF);
+    	}
+    	break;
+    case TURNR:
+    	fwdCmd.command = TURNR;
+    	fwdCmd.param1Speed = rxCmd.param1Speed;
+    	fwdCmd.param2DistAngle = rxCmd.param2DistAngle;
+    	if(motorTurnF(fwdCmd, isStateChanged)) {
+    		rxCmd.command = STOP;
+    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TURNR_COMPLETE;",0xFFFF,0xFFFF);
+    	}
+    	break;
+    case TURN90L:
+    	if(motorTurn90L(rxCmd, isStateChanged)) {
+    		rxCmd.command = STOP;
+    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TURN90L_COMPLETE;",0xFFFF,0xFFFF);
+    	}
+    	break;
+    case TURN90R:
+    	if(motorTurn90R(rxCmd, isStateChanged)) {
+    		rxCmd.command = STOP;
+    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TURN90R_COMPLETE;",0xFFFF,0xFFFF);
+    	}
+    	break;
+    case PWMTURNL:
+    	if(motorTurnPwmL(rxCmd, isStateChanged)) {
+    		rxCmd.command = STOP;
+    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/PWMTURNL_COMPLETE;",0xFFFF,0xFFFF);
+    	}
+    	break;
+    case PWMTURNR:
+    	if(motorTurnPwmR(rxCmd, isStateChanged)) {
+    		rxCmd.command = STOP;
+    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/PWMTURNR_COMPLETE;",0xFFFF,0xFFFF);
+    	}
+    	break;
+    case TASK2:
+    	if(task2Loop(rxCmd, isStateChanged)) {
+    		rxCmd.command = STOP;
+    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TASK2_COMPLETE;",0xFFFF,0xFFFF);
+    	}
+    	break;
+    default:
+    	// Nothing to do
+    	break;
+    }
+    osDelay(10); // Loop delay
   }
-
-  motorStop();
-  setServoAngle(SERVO_CENTER);
-
-  for(;;) osDelay(1000);
   /* USER CODE END motor */
 }
 
@@ -4202,25 +4192,24 @@ void encoder(void *argument)
 void servo(void *argument)
 {
   /* USER CODE BEGIN servo */
-  HAL_TIM_PWM_Start(&htim12,TIM_CHANNEL_1);
-//  setServoAngle(SERVO_CENTER);
-
+  HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_1);
+  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, SERVO_CENTER);
   /* Infinite loop */
   for(;;)
   {
-
-//	htim12.Instance->CCR1 = 105;  // extreme right
-//	osDelay(2000);
-//
-//	htim12.Instance->CCR1 = 72;  // center
-//	osDelay(2000);
-//
-//	htim12.Instance->CCR1 = 45;  // extreme left
-//	osDelay(2000);
-//
-//	htim12.Instance->CCR1 = 72;  // center
-	osDelay(1000);
-
+	  if(isFrontCalib){
+		  for (int angle = SERVO_LEFT_MAX; angle <= SERVO_RIGHT_MAX; angle += SERVO_CENTER_A_PERCENTAGE){
+			  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, angle);
+			  osDelay(5);
+		  }
+		  for (int angle = SERVO_RIGHT_MAX; angle >= SERVO_LEFT_MAX; angle -= SERVO_CENTER_A_PERCENTAGE){
+			  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, angle);
+			  osDelay(5);
+		  }
+		  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, SERVO_CENTER);
+		  isFrontCalib = 0;
+	  }
+    osDelay(100);
   }
   /* USER CODE END servo */
 }
@@ -4272,61 +4261,129 @@ void ultrasonic(void *argument)
 void readIMU(void *argument)
 {
   /* USER CODE BEGIN readIMU */
-	uint8_t reg_addr = 0x37;    // start from GYRO_ZOUT_H
-	uint8_t rawData[2];         // to store MSB and LSB
+	uint8_t gyro_reg_addr = 0x37;    // start from GYRO_ZOUT_H
+	uint8_t gyro_rawData[2];         // to store MSB and LSB
 	int16_t gyro_z_raw;
-//	char buf[20];
-//	int a;
-	uint32_t currentTime, deltaTime;
+	float gyro_z_dps_calibrated = 0.0f; // Calibrated gyro Z-axis value
+
+	uint32_t currentTime;
+    static uint32_t lastLoopTime = 0; // Static to track time across iterations
+    float dt_sec = 0.0f;
+
+    float mag_heading_rad = 0.0f;
+    const float COMPLEMENTARY_FILTER_ALPHA = 0.02f; // Adjust based on sensor noise and desired responsiveness
 
 	icm20948_init();
 	osDelay(1000); //delay to make sure ICM 20948 power up
 
-	lastAngleUpdateTime = HAL_GetTick();
+	lastLoopTime = HAL_GetTick(); // Initialize lastLoopTime
 
   /* Infinite loop */
   for(;;)
   {
-	  // -------------- Gyroscope Readings ---------------------------------------
-	// Step 1: Tell sensor which register to read
-	if(HAL_I2C_Master_Transmit(&hi2c2, 0x68 << 1, &reg_addr, 1, 1000)!= HAL_OK){
-//		OLED_ShowString(10, 20, "0");
-	}
+      // Calculate delta time for this loop iteration
+      currentTime = HAL_GetTick();
+      dt_sec = (float)(currentTime - lastLoopTime) / 1000.0f; // Convert to seconds
+      lastLoopTime = currentTime;
 
-	// Step 2: Read 2 bytes (MSB + LSB)
-	if (HAL_I2C_Master_Receive(&hi2c2, 0x68 << 1, rawData, 2, 1000)!=HAL_OK){
-//		OLED_ShowString(10, 20, "1");
-	}
-	// Combine into signed 16-bit value
-	gyro_z_raw = (int16_t)((rawData[0] << 8) | rawData[1]);
-	gyro_z_raw = gyro_z_raw / 131.0f;
+	  // -------------- GYROSCOPE READINGS ---------------------------------------
+      // Using HAL_I2C_Mem_Read for consistency and conciseness
+	  if (HAL_I2C_Mem_Read(&hi2c2, ICM20948_I2C_ADDR, gyro_reg_addr, I2C_MEMADD_SIZE_8BIT, gyro_rawData, 2, 1000)!=HAL_OK){
+	      // Error reading gyroscope data
+	  } else {
+	      // Combine into signed 16-bit value
+	      gyro_z_raw = (int16_t)((gyro_rawData[0] << 8) | gyro_rawData[1]);
+	      
+	      // Apply calibration/scaling (e.g., divide by sensitivity factor)
+	      // For ICM20948 with default settings, 131.0 LSB/dps for 250 dps range
+	      gyro_z_dps_calibrated = (float)gyro_z_raw / 131.0f;
 
-	if(fabs(gyro_z_raw) < 0.5f){
-		gyro_z_raw = 0.0f;
-	}
-	gyro_z_dps = gyro_z_raw;
+	      if(fabs(gyro_z_dps_calibrated) < 0.5f){ // Small deadband to reduce noise integration
+	          gyro_z_dps_calibrated = 0.0f;
+	      }
+	      // Update global gyro_z_dps for other uses (e.g. debugging)
+	      gyro_z_dps = gyro_z_dps_calibrated;
+	  }
 
-	// Integration for angle
-	if(isTurning){
-		currentTime = HAL_GetTick();
-		sprintf(buf4, "%d", gyro_z_raw);
-		deltaTime = currentTime - lastAngleUpdateTime;
-		if(deltaTime > 0){
-			currentAngle += gyro_z_dps * (deltaTime / 1000.0f);
-			lastAngleUpdateTime = currentTime;
-		}
-	}
-	//format for OLED display
-//	a = gyro_z_dps;
-//	sprintf(buf, "%d\n", a);
-//	OLED_ShowString(10, 20, buf);
-//	HAL_UART_Transmit(&huart3,(uint8_t *)buf,strlen(buf),0xFFFF);
-	// ------------------ End of Gyroscope Readings -------------------------------
 
-//	sprintf(buf, "%3d", a);
-//	OLED_ShowString(10, 20, buf);
-	osDelay(10);
+	  // -------------- MAGNETOMETER READINGS ------------------------------------
+      uint8_t mag_data[8]; // 6 data bytes + 2 status bytes
+      uint8_t st1;
+      uint8_t retries = 5;
 
+      // Wait for data ready (DRDY bit 0 in ST1)
+      do {
+          if (HAL_I2C_Mem_Read(&hi2c2, AK09916_I2C_ADDR, AK09916_ST1_REG, I2C_MEMADD_SIZE_8BIT, &st1, 1, 100) != HAL_OK) {
+              // Error reading ST1, break loop for this iteration
+              break;
+          }
+          if (retries-- == 0) {
+              // Data never became ready within retries, break loop
+              break;
+          }
+          osDelay(1); // Small delay before re-checking
+      } while (!(st1 & 0x01)); // Check DRDY bit (bit 0)
+
+      if (retries > 0) { // Only read magnetic data if it was ready
+          // Read 8 bytes: HXL, HXH, HYL, HYH, HZL, HZH, ST2
+          if (HAL_I2C_Mem_Read(&hi2c2, AK09916_I2C_ADDR, AK09916_HXL_REG, I2C_MEMADD_SIZE_8BIT, mag_data, 8, 100) != HAL_OK) {
+              // Error reading magnetic data
+          } else {
+              // Combine bytes into 16-bit values (little-endian)
+              magX = (int16_t)(mag_data[1] << 8 | mag_data[0]);
+              magY = (int16_t)(mag_data[3] << 8 | mag_data[2]);
+              magZ = (int16_t)(mag_data[5] << 8 | mag_data[4]);
+
+              // Check ST2 register (mag_data[7] contains ST2) for overflow (HOFL bit 3)
+              if (mag_data[7] & 0x08) {
+                  // Magnetic sensor overflow has occurred.
+              }
+          }
+      }
+
+    // --- MAGNETOMETER YAW CALCULATION ---
+    // Convert raw magX, magY to heading. Requires calibration for best results.
+    // For now, a simple atan2 is used.
+    // Ensure to account for sensor orientation on the board relative to robot's forward.
+    // E.g., if +X is forward and +Y is left on the sensor, and robot +X is forward, +Y is left,
+    // then atan2(magY, magX) might give heading relative to sensor X-axis.
+    // Adjust based on how sensor is mounted.
+    mag_heading_rad = atan2f((float)magY, (float)magX); // in radians
+    float mag_heading_deg = mag_heading_rad * (180.0f / M_PI); // Convert to degrees
+
+    // Normalize to 0-360 degrees
+    if (mag_heading_deg < 0) mag_heading_deg += 360.0f;
+
+
+    // --- COMPLEMENTARY FILTER FOR YAW ---
+    // dt_sec is already calculated at the beginning of the loop
+
+    if (dt_sec > 0) {
+        // Integrate gyro (angular velocity * time)
+        float gyro_angle_change = gyro_z_dps_calibrated * dt_sec;
+        float gyro_integrated_angle = currentAngle + gyro_angle_change; // currentAngle is our current best estimate
+
+        // Normalize mag_heading_deg to be close to gyro_integrated_angle for smooth blending
+        // This is important to avoid large jumps if mag_heading_deg crosses 0/360 boundary
+        float angle_diff = mag_heading_deg - gyro_integrated_angle;
+        if (angle_diff > 180.0f) angle_diff -= 360.0f;
+        if (angle_diff < -180.0f) angle_diff += 360.0f;
+        mag_heading_deg = gyro_integrated_angle + angle_diff;
+
+
+        // Complementary filter equation:
+        // long-term stability from magnetometer, short-term dynamics from gyroscope
+        complementary_filter_angle = COMPLEMENTARY_FILTER_ALPHA * mag_heading_deg + (1.0f - COMPLEMENTARY_FILTER_ALPHA) * gyro_integrated_angle;
+
+        // Normalize the final angle to 0-360
+        // (This assumes we want the output angle to be within 0-360 range for target comparison)
+        if (complementary_filter_angle >= 360.0f) complementary_filter_angle -= 360.0f;
+        if (complementary_filter_angle < 0.0f) complementary_filter_angle += 360.0f;
+
+        // Update currentAngle with the fused estimate
+        currentAngle = complementary_filter_angle;
+    }
+	osDelay(10); // Maintain the loop delay
   }
   /* USER CODE END readIMU */
 }
@@ -4342,9 +4399,12 @@ void rxSerial(void *argument)
 {
   /* USER CODE BEGIN rxSerial */
   /* Infinite loop */
-  for(;;){
-	if (commandReady) rxSerialParse();
-	osDelay(100);
+  for(;;)
+  {
+	if(commandReady){
+		rxSerialParse();
+	}
+    osDelay(1);
   }
   /* USER CODE END rxSerial */
 }
@@ -4452,6 +4512,7 @@ void buzzer(void *argument)
   /* USER CODE END buzzer */
 }
 
+
 /* USER CODE BEGIN Header_irSensor */
 /**
 * @brief Function implementing the irSensorTask thread.
@@ -4470,18 +4531,17 @@ void irSensor(void *argument)
   /* Infinite loop */
   for(;;)
   {
-	  leftNow  = IR_LeftDetected();
-	  	rightNow = IR_RightDetected();
+	  leftNow = IR_LeftDetected();
+	  rightNow = IR_RightDetected();
+	  if (leftNow != leftPrev || rightNow != rightPrev){
+	  	  //	OLED_PrintStatus(leftNow, rightNow);  // instant flip: DETECTED/CLEAR
+	  	  		leftPrev  = leftNow;
+	  	  		rightPrev = rightNow;
+	  }
+	  	  //	sprintf(buf4, "left detected: %d\0", leftNow);
 
-	  	if (leftNow != leftPrev || rightNow != rightPrev){
-	  //	OLED_PrintStatus(leftNow, rightNow);  // instant flip: DETECTED/CLEAR
-	  		leftPrev  = leftNow;
-	  		rightPrev = rightNow;
-	  	}
-	  //	sprintf(buf4, "left detected: %d\0", leftNow);
-
-	  	// optional: small delay so we don’t spin at 100% CPU
-	  	osDelay(50);
+	  	  	// optional: small delay so we don’t spin at 100% CPU
+	  osDelay(50);
   }
   /* USER CODE END irSensor */
 }
