@@ -13,12 +13,17 @@
 const char* STM32_DEVICE = "rpi_to_stm";
 const char* ANDROID_DEVICE = "android_to_rpi";
 const char* PATHFINDING_SERVER_URL = "http://127.0.0.1:4000/path";
-const char* IMAGE_SERVER_URL = "http://127.0.0.1:5000/detect"; 
+const char* IMAGE_SERVER_URL = "http://127.0.0.1:5000/detect";
+#elif defined(FAKE_ANDROID_SIMULATION)
+const char* STM32_DEVICE = "/dev/ttyACM0";
+const char* ANDROID_DEVICE = "android_to_rpi";
+const char* PATHFINDING_SERVER_URL = "http://127.0.0.1:4000/path";
+const char* IMAGE_SERVER_URL = "http://127.0.0.1:5000/detect";
 #else
 const char* STM32_DEVICE = "/dev/ttyACM0";
 const char* ANDROID_DEVICE = "/dev/rfcomm0";
-const char* PATHFINDING_SERVER_URL = "http://192.168.7.230:4000/path";
-const char* IMAGE_SERVER_URL = "http://192.168.7.113:5000/detect";
+const char* PATHFINDING_SERVER_URL = "http://192.168.22.230:4000/path";
+const char* IMAGE_SERVER_URL = "http://192.168.22.7:5000/detect";
 #endif
 
 const int BAUD_RATE = 115200;
@@ -339,9 +344,10 @@ int main() {
  *   # Compile the code with the RPI_TESTING flag.
  *   # This tells the code to use the named pipes instead of real serial ports.
  *   gcc -o test_center -DRPI_TESTING multithread_communication.c rpi_hal.c -I. -pthread -lcurl -Wall
- *
+ *   gcc -o STtest_center -DFAKE_ANDROID_SIMULATION multithread_communication.c rpi_hal.c -I. -pthread -lcurl -Wall   
  *   # Run the test version. It will start and wait for a command from the fake Android pipe.
  *   ./test_center
+ *   ./STtest_center
  *
  *
  * --- In Terminal 4: Send Commands as Fake Android ---
