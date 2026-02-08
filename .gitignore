@@ -21,3 +21,4 @@
 *.mkd
 *.mk
 .venv
+*.ld
