@@ -6,7 +6,8 @@ void IR_Sensors_Init(void){
 
   GPIO_InitTypeDef g = {0};
   g.Mode  = GPIO_MODE_INPUT;
-  g.Pull  = GPIO_NOPULL;          // If your module is open-drain, use GPIO_PULLUP
+  // g.Pull  = GPIO_NOPULL;
+  g.Pull  = GPIO_PULLUP;          // Set to PULLUP to ensure a stable HIGH state when no sensor is connected
   g.Speed = GPIO_SPEED_FREQ_LOW;
 
   // LEFT -> PC6

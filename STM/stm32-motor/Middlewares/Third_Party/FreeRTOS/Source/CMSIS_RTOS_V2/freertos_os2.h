@@ -266,7 +266,7 @@
   #endif
 #endif
 
-#if (configUSE_TRACE_FACILITY == 0)
+#if (configUSE_TRACE_FACILITY == 1)
   /*
     CMSIS-RTOS2 function osThreadEnumerate requires FreeRTOS function uxTaskGetSystemState
     which is only enabled if configUSE_TRACE_FACILITY == 1.
