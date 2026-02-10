@@ -323,7 +323,7 @@ const osThreadAttr_t ultrasonicTask_attributes = {
 osThreadId_t readIMUTaskHandle;
 const osThreadAttr_t readIMUTask_attributes = {
   .name = "readIMUTask",
-  .stack_size = 128 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for rxSerialTask */
@@ -681,9 +681,9 @@ uint8_t motorPidForward(MotorCommand_t cmd, uint8_t isStateChanged) {
 
 	// MotorA & MotorB speed difference fix
 	float headingError = totalDistanceA - totalDistanceB;
-	const float Kp_heading = 1.0f;
-	const float Ki_heading = 1.0f;
-	const float Kd_heading = 1.0f;
+	const float Kp_heading = 1.2f;
+	const float Ki_heading = 0.01f;
+	const float Kd_heading = 0.0f;
 
 	headingIntegral += headingError;
 	if(headingIntegral > 100) headingIntegral = 100;
@@ -1879,186 +1879,283 @@ void setServoAngle(int pwm) {
 }
 
 uint8_t motorTurn(MotorCommand_t cmd, uint8_t isStateChanged) {
-    if(isStateChanged) {
-        // Reset
-    	if(cmd.command == TURNL) setServoAngle(SERVO_LEFT_MAX);
-    	if(cmd.command == TURNR) setServoAngle(SERVO_RIGHT_MAX);
-        currentAngle = 0.0f;
-        targetAngle = cmd.param2DistAngle; // Target angle
-        isTurning = 1;
-        isFrontCalib = 0;
-        lastAngleUpdateTime = HAL_GetTick();
-        osDelay(200);
-    }
+	static float startTurnHeading = 0.0f; // Stores the absolute heading at the start of the turn
+	static float targetTurnAngle = 0.0f; // The magnitude of the turn (e.g., 90 degrees)
 
-//    OLED_ShowString(10, 20, rxBuffer);
-//    OLED_ShowString(10, 30, rxBuffer);
+	if(isStateChanged) {
+		// Set servo direction based on command
+		if(cmd.command == TURNL) setServoAngle(SERVO_LEFT_MAX);
+		if(cmd.command == TURNR) setServoAngle(SERVO_RIGHT_MAX);
 
-    int turnSpeed = cmd.param1Speed;
-    float remaining = fabs(targetAngle) - fabs(currentAngle);
+		startTurnHeading = currentAngle; // Capture the absolute heading from the IMU
+		targetTurnAngle = cmd.param2DistAngle; // The desired magnitude of the turn
 
-    if(remaining < 0.0f) {
-        motorStop();
-        isTurning = 0;
-        setServoAngle(SERVO_CENTER);
-        sprintf(buf1,"Target:  %.3f", targetAngle);
-        sprintf(buf2,"Current: %.3f", currentAngle);
-//        sprintf(buf3,"Remain: %.3f", remaining);
-        return 1;
-    }else if(remaining < 10.0f){
-    	if(turnSpeed>1000){
-    		turnSpeed = 1000;
-    	}
-    }else if(remaining < 30.0f){
-    	if(turnSpeed>2000){
-    		turnSpeed = 2000;
-    	}
-    }else if(remaining < 45.0f){
-    	if(turnSpeed>4000){
-    		turnSpeed = 4000;
-    	}
-    }else if(remaining < 60.0f){
-    	if(turnSpeed>5000){
-    		turnSpeed = 5000;
-    	}
-    }
+		isTurning = 1; // Flag to indicate a turn is in progress
+		isFrontCalib = 0;
+		lastAngleUpdateTime = HAL_GetTick(); // Reset time for potential future delta time calculations
+		osDelay(100); // Small delay to allow servo to reach position
+	}
 
-    sprintf(buf1,"Target:  %.3f", targetAngle);
-    sprintf(buf2,"Current: %.3f", currentAngle);
-//    sprintf(buf3,"Remain: %.3f", remaining);
+	// Calculate the angle turned relative to the start of this command
+	float angleTurned = currentAngle - startTurnHeading;
 
-    if(cmd.command == TURNR) {
-    	motorForwardA(turnSpeed);
-    	motorStopB();
-    }
-    if(cmd.command == TURNL) {
-    	motorForwardB(turnSpeed);
-    	motorStopA();
-    }
+	// Normalize angleTurned to be within -180 to 180 degrees to handle wrap-around
+	// e.g., if startTurnHeading=350 and currentAngle=10, angleTurned should be 20 degrees, not -340.
+	if (angleTurned > 180.0f) angleTurned -= 360.0f;
+	else if (angleTurned < -180.0f) angleTurned += 360.0f;
 
-    return 0;
+	// Determine if the target angle has been reached
+	uint8_t turnCompleted = 0;
+	if (cmd.command == TURNR) { // Turning Right (positive angle)
+		if (angleTurned >= targetTurnAngle) {
+			turnCompleted = 1;
+		}
+	} else if (cmd.command == TURNL) { // Turning Left (negative angle, or positive if targetTurnAngle is also positive)
+		// If targetTurnAngle is always given as a positive magnitude (e.g., 90 for left or right)
+		// then we compare against negative angle for left turn
+		if (angleTurned <= -targetTurnAngle) {
+			turnCompleted = 1;
+		}
+	}
+
+	if(turnCompleted) {
+		motorStop();
+		isTurning = 0;
+		setServoAngle(SERVO_CENTER); // Return servo to center
+		sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+		sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+		sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+		sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+		return 1; // Turn completed
+	}
+
+	// Speed adjustment (deceleration logic) as robot approaches target angle
+	int turnSpeed = cmd.param1Speed;
+	float angleRemaining = targetTurnAngle - fabs(angleTurned);
+
+	if(angleRemaining < 10.0f){
+		if(turnSpeed>1000){
+			turnSpeed = 1000;
+		}
+	}else if(angleRemaining < 30.0f){
+		if(turnSpeed>2000){
+			turnSpeed = 2000;
+		}
+	}else if(angleRemaining < 45.0f){
+		if(turnSpeed>4000){
+			turnSpeed = 4000;
+		}
+	}else if(angleRemaining < 60.0f){
+		if(turnSpeed>5000){
+			turnSpeed = 5000;
+		}
+	}
+
+	// Apply motor speeds
+	if(cmd.command == TURNR) {
+		motorForwardA(turnSpeed); // Left wheel forward (confirmed by user for right turn)
+		motorStopB();             // Right wheel stopped
+	}
+	if(cmd.command == TURNL) {
+		motorForwardB(turnSpeed); // Right wheel forward
+		motorStopA();             // Left wheel stopped
+	}
+
+    sprintf((char*)buf1,"Tgt: %.1f deg\n", targetTurnAngle);
+	HAL_UART_Transmit(&huart3,buf1,strlen(buf1),0xFFFF);
+	sprintf((char*)buf2,"Actual:%.1f deg\n", angleTurned);
+	HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+	sprintf((char*)buf3,"StartH:%.1f\n", startTurnHeading);
+	HAL_UART_Transmit(&huart3,buf3,strlen(buf3),0xFFFF);
+	sprintf((char*)buf4,"CurrentH:%.1f\n", currentAngle);
+	HAL_UART_Transmit(&huart3,buf4,strlen(buf4),0xFFFF);
+
+	return 0; // Turn in progress
 }
 
 uint8_t motorTurnF(MotorCommandF_t cmd, uint8_t isStateChanged) {
+    static float startTurnHeading = 0.0f; // Stores the absolute heading at the start of the turn
+    static float targetTurnAngle = 0.0f; // The magnitude of the turn (e.g., 90 degrees)
+
     if(isStateChanged) {
-        // Reset
+        // Set servo direction based on command
     	if(cmd.command == TURNL) setServoAngle(SERVO_LEFT_MAX);
     	if(cmd.command == TURNR) setServoAngle(SERVO_RIGHT_MAX);
-        currentAngle = 0.0f;
-        targetAngle = cmd.param2DistAngle; // Target angle
-        isTurning = 1;
+
+        startTurnHeading = currentAngle; // Capture the absolute heading from the IMU
+        targetTurnAngle = cmd.param2DistAngle; // The desired magnitude of the turn
+
+        isTurning = 1; // Flag to indicate a turn is in progress
         isFrontCalib = 0;
-        lastAngleUpdateTime = HAL_GetTick();
-        osDelay(100);
+        lastAngleUpdateTime = HAL_GetTick(); // Reset time for potential future delta time calculations
+        osDelay(100); // Small delay to allow servo to reach position
     }
 
-//    OLED_ShowString(10, 20, rxBuffer);
-//    OLED_ShowString(10, 30, rxBuffer);
+    // Calculate the angle turned relative to the start of this command
+    float angleTurned = currentAngle - startTurnHeading;
+    // Normalize angleTurned to be within -180 to 180 degrees to handle wrap-around
+    // e.g., if startTurnHeading=350 and currentAngle=10, angleTurned should be 20 degrees, not -340.
+    if (angleTurned > 180.0f) angleTurned -= 360.0f;
+    else if (angleTurned < -180.0f) angleTurned += 360.0f;
 
-    int turnSpeed = cmd.param1Speed;
-    float remaining = fabs(targetAngle) - fabs(currentAngle);
+    // Determine if the target angle has been reached
+    uint8_t turnCompleted = 0;
+    if (cmd.command == TURNR) { // Turning Right (positive angle)
+        if (angleTurned >= targetTurnAngle) {
+            turnCompleted = 1;
+        }
+    } else if (cmd.command == TURNL) { // Turning Left (negative angle, or positive if targetTurnAngle is also positive)
+        // If targetTurnAngle is always given as a positive magnitude (e.g., 90 for left or right)
+        // then we compare against negative angle for left turn
+        if (angleTurned <= -targetTurnAngle) {
+            turnCompleted = 1;
+        }
+    }
 
-    if(remaining < 0.0f) {
+    if(turnCompleted) {
         motorStop();
         isTurning = 0;
-        setServoAngle(SERVO_CENTER);
-        sprintf(buf1,"Target:  %.3f", targetAngle);
-        sprintf(buf2,"Current: %.3f", currentAngle);
-//        sprintf(buf3,"Remain: %.3f", remaining);
-        return 1;
-    }else if(remaining < 10.0f){
+        setServoAngle(SERVO_CENTER); // Return servo to center
+        sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+        sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+        sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+        sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+        return 1; // Turn completed
+    }
+
+    // Speed adjustment (deceleration logic) as robot approaches target angle
+    int turnSpeed = cmd.param1Speed;
+    float angleRemaining = targetTurnAngle - fabs(angleTurned);
+
+    if(angleRemaining < 10.0f){
     	if(turnSpeed>1000){
     		turnSpeed = 1000;
     	}
-    }else if(remaining < 30.0f){
+    }else if(angleRemaining < 30.0f){
     	if(turnSpeed>2000){
     		turnSpeed = 2000;
     	}
-    }else if(remaining < 45.0f){
+    }else if(angleRemaining < 45.0f){
     	if(turnSpeed>4000){
     		turnSpeed = 4000;
     	}
-    }else if(remaining < 60.0f){
+    }else if(angleRemaining < 60.0f){
     	if(turnSpeed>5000){
     		turnSpeed = 5000;
     	}
     }
 
-    sprintf(buf1,"Target:  %.3f", targetAngle);
-    sprintf(buf2,"Current: %.3f", currentAngle);
-//    sprintf(buf3,"Remain: %.3f", remaining);
-
+    // Apply motor speeds
     if(cmd.command == TURNR) {
-    	motorForwardA(turnSpeed);
-    	motorStopB();
+    	motorForwardA(turnSpeed); // Left wheel forward (confirmed by user for right turn)
+    	motorStopB();             // Right wheel stopped
     }
     if(cmd.command == TURNL) {
-    	motorForwardB(turnSpeed);
-    	motorStopA();
+    	motorForwardB(turnSpeed); // Right wheel forward
+    	motorStopA();             // Left wheel stopped
     }
 
-    return 0;
+    sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+    HAL_UART_Transmit(&huart3,buf1,strlen(buf1),0xFFFF);
+    sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+    HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+    sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+    HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+    sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+    HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+
+    return 0; // Turn in progress
 }
 
 uint8_t motorTurnF1(MotorCommandF_t cmd, uint8_t isStateChanged) {
-    if(isStateChanged) {
-        // Reset
-    	if(cmd.command == TURNL) setServoAngle(SERVO_LEFT1);
-    	if(cmd.command == TURNR) setServoAngle(SERVO_RIGHT1);
-        currentAngle = 0.0f;
-        targetAngle = cmd.param2DistAngle; // Target angle
-        isTurning = 1;
-        isFrontCalib = 0;
-        lastAngleUpdateTime = HAL_GetTick();
-        osDelay(100);
-    }
+	static float startTurnHeading = 0.0f; // Stores the absolute heading at the start of the turn
+	static float targetTurnAngle = 0.0f; // The magnitude of the turn (e.g., 90 degrees)
 
-//    OLED_ShowString(10, 20, rxBuffer);
-//    OLED_ShowString(10, 30, rxBuffer);
+	if(isStateChanged) {
+		// Set servo direction based on command
+		if(cmd.command == TURNL) setServoAngle(SERVO_LEFT_MAX);
+		if(cmd.command == TURNR) setServoAngle(SERVO_RIGHT_MAX);
 
-    int turnSpeed = cmd.param1Speed;
-    float remaining = fabs(targetAngle) - fabs(currentAngle);
+		startTurnHeading = currentAngle; // Capture the absolute heading from the IMU
+		targetTurnAngle = cmd.param2DistAngle; // The desired magnitude of the turn
 
-    if(remaining < 0.0f) {
-        motorStop();
-        isTurning = 0;
-        setServoAngle(SERVO_CENTER);
-        sprintf(buf1,"Target:  %.3f", targetAngle);
-        sprintf(buf2,"Current: %.3f", currentAngle);
-//        sprintf(buf3,"Remain: %.3f", remaining);
-        return 1;
-    }else if(remaining < 10.0f){
-    	if(turnSpeed>1000){
-    		turnSpeed = 1000;
-    	}
-    }else if(remaining < 30.0f){
-    	if(turnSpeed>2000){
-    		turnSpeed = 2000;
-    	}
-    }else if(remaining < 45.0f){
-    	if(turnSpeed>4000){
-    		turnSpeed = 4000;
-    	}
-    }else if(remaining < 60.0f){
-    	if(turnSpeed>5000){
-    		turnSpeed = 5000;
-    	}
-    }
+		isTurning = 1; // Flag to indicate a turn is in progress
+		isFrontCalib = 0;
+		lastAngleUpdateTime = HAL_GetTick(); // Reset time for potential future delta time calculations
+		osDelay(100); // Small delay to allow servo to reach position
+	}
 
-    sprintf(buf1,"Target:  %.3f", targetAngle);
-    sprintf(buf2,"Current: %.3f", currentAngle);
-//    sprintf(buf3,"Remain: %.3f", remaining);
+	// Calculate the angle turned relative to the start of this command
+	float angleTurned = currentAngle - startTurnHeading;
 
-    if(cmd.command == TURNR) {
-    	motorForwardA(turnSpeed);
-    	motorStopB();
-    }
-    if(cmd.command == TURNL) {
-    	motorForwardB(turnSpeed);
-    	motorStopA();
-    }
+	// Normalize angleTurned to be within -180 to 180 degrees to handle wrap-around
+	// e.g., if startTurnHeading=350 and currentAngle=10, angleTurned should be 20 degrees, not -340.
+	if (angleTurned > 180.0f) angleTurned -= 360.0f;
+	else if (angleTurned < -180.0f) angleTurned += 360.0f;
 
-    return 0;
+	// Determine if the target angle has been reached
+	uint8_t turnCompleted = 0;
+	if (cmd.command == TURNR) { // Turning Right (positive angle)
+		if (angleTurned >= targetTurnAngle) {
+			turnCompleted = 1;
+		}
+	} else if (cmd.command == TURNL) { // Turning Left (negative angle, or positive if targetTurnAngle is also positive)
+		// If targetTurnAngle is always given as a positive magnitude (e.g., 90 for left or right)
+		// then we compare against negative angle for left turn
+		if (angleTurned <= -targetTurnAngle) {
+			turnCompleted = 1;
+		}
+	}
+
+	if(turnCompleted) {
+		motorStop();
+		isTurning = 0;
+		setServoAngle(SERVO_CENTER); // Return servo to center
+		sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+		sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+		sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+		sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+		return 1; // Turn completed
+	}
+
+	// Speed adjustment (deceleration logic) as robot approaches target angle
+	int turnSpeed = cmd.param1Speed;
+	float angleRemaining = targetTurnAngle - fabs(angleTurned);
+
+	if(angleRemaining < 10.0f){
+		if(turnSpeed>1000){
+			turnSpeed = 1000;
+		}
+	}else if(angleRemaining < 30.0f){
+		if(turnSpeed>2000){
+			turnSpeed = 2000;
+		}
+	}else if(angleRemaining < 45.0f){
+		if(turnSpeed>4000){
+			turnSpeed = 4000;
+		}
+	}else if(angleRemaining < 60.0f){
+		if(turnSpeed>5000){
+			turnSpeed = 5000;
+		}
+	}
+
+	// Apply motor speeds
+	if(cmd.command == TURNR) {
+		motorForwardA(turnSpeed); // Left wheel forward (confirmed by user for right turn)
+		motorStopB();             // Right wheel stopped
+	}
+	if(cmd.command == TURNL) {
+		motorForwardB(turnSpeed); // Right wheel forward
+		motorStopA();             // Left wheel stopped
+	}
+
+	sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+	sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+	sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+	sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+
+	return 0; // Turn in progress
 }
 
 uint8_t motorTurnPwmL(MotorCommand_t cmd, uint8_t isStateChanged) {
@@ -4011,98 +4108,114 @@ void show(void *argument)
 void motor(void *argument)
 {
   /* USER CODE BEGIN motor */
-  MotorCommand_t rxCmd;
-  static MotorCommandF_t fwdCmd;
-  fwdCmd.cmdId = 0;
-  static uint8_t isStateChanged = 1;
-  /* Infinite loop */
-  for(;;)
-  {
-	// Check for new command
-	if(xQueueReceive(motorCommandQueue, &rxCmd, 0) == pdPASS) {
-		isStateChanged = 1; // Mark that state has changed
-		sprintf(buf, "%d %d %d", rxCmd.command, rxCmd.param1Speed, rxCmd.param2DistAngle);
-	}else{
-		isStateChanged = 0;
-	}
-
-    switch(rxCmd.command){
-    case FWD:
-    	fwdCmd.command = FWD;
-    	fwdCmd.param1Speed = rxCmd.param1Speed;
-    	fwdCmd.param2DistAngle = rxCmd.param2DistAngle;
-    	if(motorPidForwardF(fwdCmd, isStateChanged)) {
-    		rxCmd.command = STOP;
-    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/FWD_COMPLETE;",0xFFFF,0xFFFF);
-    	}
-    	break;
-    case REV:
-    	fwdCmd.command = REV;
-    	fwdCmd.param1Speed = rxCmd.param1Speed;
-    	fwdCmd.param2DistAngle = rxCmd.param2DistAngle;
-    	if(motorPidReverseF(fwdCmd, isStateChanged)) {
-    		rxCmd.command = STOP;
-    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/REV_COMPLETE;",0xFFFF,0xFFFF);
-    	}
-    	break;
-    case STOP:
-    	motorStop();
-    	HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/STOP_COMPLETE;",0xFFFF,0xFFFF);
-    	break;
-    case TURNL:
-    	fwdCmd.command = TURNL;
-    	fwdCmd.param1Speed = rxCmd.param1Speed;
-    	fwdCmd.param2DistAngle = rxCmd.param2DistAngle;
-    	if(motorTurnF(fwdCmd, isStateChanged)) {
-    		rxCmd.command = STOP;
-    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TURNL_COMPLETE;",0xFFFF,0xFFFF);
-    	}
-    	break;
-    case TURNR:
-    	fwdCmd.command = TURNR;
-    	fwdCmd.param1Speed = rxCmd.param1Speed;
-    	fwdCmd.param2DistAngle = rxCmd.param2DistAngle;
-    	if(motorTurnF(fwdCmd, isStateChanged)) {
-    		rxCmd.command = STOP;
-    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TURNR_COMPLETE;",0xFFFF,0xFFFF);
-    	}
-    	break;
-    case TURN90L:
-    	if(motorTurn90L(rxCmd, isStateChanged)) {
-    		rxCmd.command = STOP;
-    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TURN90L_COMPLETE;",0xFFFF,0xFFFF);
-    	}
-    	break;
-    case TURN90R:
-    	if(motorTurn90R(rxCmd, isStateChanged)) {
-    		rxCmd.command = STOP;
-    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TURN90R_COMPLETE;",0xFFFF,0xFFFF);
-    	}
-    	break;
-    case PWMTURNL:
-    	if(motorTurnPwmL(rxCmd, isStateChanged)) {
-    		rxCmd.command = STOP;
-    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/PWMTURNL_COMPLETE;",0xFFFF,0xFFFF);
-    	}
-    	break;
-    case PWMTURNR:
-    	if(motorTurnPwmR(rxCmd, isStateChanged)) {
-    		rxCmd.command = STOP;
-    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/PWMTURNR_COMPLETE;",0xFFFF,0xFFFF);
-    	}
-    	break;
-    case TASK2:
-    	if(task2Loop(rxCmd, isStateChanged)) {
-    		rxCmd.command = STOP;
-    		HAL_UART_Transmit(&huart3,(uint8_t *)"!0/OK/TASK2_COMPLETE;",0xFFFF,0xFFFF);
-    	}
-    	break;
-    default:
-    	// Nothing to do
-    	break;
-    }
-    osDelay(10); // Loop delay
+  MotorCommand_t cmd;
+  uint8_t ack[50] = {0};
+  setServoAngle(SERVO_RIGHT_MAX);
+  osDelay(500);
+  setServoAngle(SERVO_CENTER);
+  osDelay(500);
+  enum {FWD,REV,STOP,TURNL,TURNR, TURN90L, TURN90R, TASK2} currentState = STOP;
+  uint8_t isStateChanged = 0;
+  while(isContinue) {
+	  if(xQueueReceive(motorCommandQueue, &cmd, 0) == pdPASS){
+		  currentState = cmd.command;
+		  isStateChanged = 1;
+	  }else{
+		  isStateChanged = 0;
+	  }
+	  if(currentState != STOP && music == MUTE && isContinue) music=BGM;
+	  switch(currentState) {
+	  if(isContinue==0) currentState = STOP;
+	  case FWD:
+		  if(motorPidForward(cmd, isStateChanged)) {
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case REV:
+		  if(motorPidReverse(cmd, isStateChanged)) {
+		  	currentState = STOP;
+		  	motorStop();
+		  	sprintf(ack, "!%d/DONE;",cmd.cmdId);
+		  	HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case TURN90L:
+		  if(motorTurn90L(cmd, isStateChanged)){
+		  	currentState = STOP;
+		  	motorStop();
+		  	sprintf(ack, "!%d/DONE;",cmd.cmdId);
+		  	HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case TURN90R:
+		  if(motorTurn90R(cmd, isStateChanged)){
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case TASK2:
+		  if(task2Loop(cmd, isStateChanged)){
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case PWMTURNL:
+		  if(motorTurnPwmL(cmd, isStateChanged)){
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case PWMTURNR:
+	  	  if(motorTurnPwmR(cmd, isStateChanged)){
+	  		  currentState = STOP;
+	  		  motorStop();
+	  		  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+	  		  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+	  	  }
+	  	  break;
+	  case TURNL:
+		  if(motorTurn(cmd, isStateChanged)){
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case TURNR:
+	  	  if(motorTurn(cmd, isStateChanged)){
+	  		  currentState = STOP;
+	  		  motorStop();
+	  		  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+	  		  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+	  	  }
+	  	  break;
+	  case STOP:
+		  if(isStateChanged){
+			  isFrontCalib = 0;
+			  isTurning = 0;
+			  motorStop();
+			  if(cmd.command == STOP){
+				  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+				  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+			  }
+		  }
+	  }
+	  osDelay(1);
   }
+
+  motorStop();
+  setServoAngle(SERVO_CENTER);
+
+  for(;;) osDelay(1000);
   /* USER CODE END motor */
 }
 
@@ -4297,7 +4410,7 @@ void readIMU(void *argument)
 	      // Apply calibration/scaling (e.g., divide by sensitivity factor)
 	      // For ICM20948 with default settings, 131.0 LSB/dps for 250 dps range
 	      gyro_z_dps_calibrated = (float)gyro_z_raw / 131.0f;
-
+	      gyro_z_dps_calibrated = -gyro_z_dps_calibrated; // Invert sign for correct rotation direction
 	      if(fabs(gyro_z_dps_calibrated) < 0.5f){ // Small deadband to reduce noise integration
 	          gyro_z_dps_calibrated = 0.0f;
 	      }
@@ -4348,7 +4461,7 @@ void readIMU(void *argument)
     // E.g., if +X is forward and +Y is left on the sensor, and robot +X is forward, +Y is left,
     // then atan2(magY, magX) might give heading relative to sensor X-axis.
     // Adjust based on how sensor is mounted.
-    mag_heading_rad = atan2f((float)magY, (float)magX); // in radians
+    mag_heading_rad = atan2f((float)magY, (float)-magX); // in radians
     float mag_heading_deg = mag_heading_rad * (180.0f / M_PI); // Convert to degrees
 
     // Normalize to 0-360 degrees
@@ -4383,6 +4496,26 @@ void readIMU(void *argument)
         // Update currentAngle with the fused estimate
         currentAngle = complementary_filter_angle;
     }
+    // for debugging, angle seems to be stalling
+//    sprintf((char*)buf1,"gyro_z_raw: %.1f deg\n", gyro_z_raw);
+//	HAL_UART_Transmit(&huart3,buf1,strlen(buf1),0xFFFF);
+//	sprintf((char*)buf2,"mag_heading_deg:%.1f deg\n", mag_heading_deg);
+//	HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+//	sprintf((char*)buf3,"gyro_z_dps_calibrated:%.1f\n", gyro_z_dps_calibrated);
+//	HAL_UART_Transmit(&huart3,buf3,strlen(buf3),0xFFFF);
+//	sprintf((char*)buf4,"complementary_filter_angle:%.1f\n", complementary_filter_angle);
+//	HAL_UART_Transmit(&huart3,buf4,strlen(buf4),0xFFFF);
+
+//   static uint32_t lastReadIMUPrintTime = 0;
+//   if (HAL_GetTick() - lastReadIMUPrintTime > 500) { // Print every 500ms
+//	   char debug_msg[150]; // Increased buffer size for multiple floats
+//	   int len = snprintf(debug_msg, sizeof(debug_msg),
+//	   "GZ_DPS:%.1f MAG_HDG:%.1f CFLT:%.1f CA:%.1f\r\n",
+//	   gyro_z_dps_calibrated, mag_heading_deg, complementary_filter_angle, currentAngle);
+//	   HAL_UART_Transmit(&huart3, (uint8_t*)debug_msg, len, HAL_MAX_DELAY);
+//	   lastReadIMUPrintTime = HAL_GetTick();
+//   }
+
 	osDelay(10); // Maintain the loop delay
   }
   /* USER CODE END readIMU */

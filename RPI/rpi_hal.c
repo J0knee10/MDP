@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
+#include <stdint.h>
 #include <errno.h>
 #include <curl/curl.h>
 
@@ -217,29 +218,29 @@ int send_command_to_stm32(int fd, Command command) {
     switch (command.type) {
         case CMD_MOVE_FORWARD:
             // STM32 format: :<cmdid>/MOTOR/FWD/<param1Speed>/<param2DistAngle>;
-            snprintf(stm_command, sizeof(stm_command), \":%lu/MOTOR/FWD/%d/%d;\", 
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/FWD/%d/%d;", 
                      cmd_id_counter, DEFAULT_MOVE_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_TURN_LEFT:
             // STM32 format: :<cmdid>/MOTOR/TURNL/<param1Speed>/<param2DistAngle>;
-            snprintf(stm_command, sizeof(stm_command), \":%lu/MOTOR/TURNL/%d/%d;\", 
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNL/%d/%d;", 
                      cmd_id_counter, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_TURN_RIGHT:
             // STM32 format: :<cmdid>/MOTOR/TURNR/<param1Speed>/<param2DistAngle>;
-            snprintf(stm_command, sizeof(stm_command), \":%lu/MOTOR/TURNR/%d/%d;\", 
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNR/%d/%d;", 
                      cmd_id_counter, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_SNAPSHOT:
             // Snapshots are handled by the RPi itself and are not sent to the STM32.
             // For now, these are not commands for the STM32.
-            printf(\"[To STM32]: Skipping snapshot command (handled by RPi).\\n\");
+            printf("[To STM32]: Skipping snapshot command (handled by RPi).\n");
             return 0; // Indicate success but no command sent to STM32
         default:
-            fprintf(stderr, \"send_command_to_stm32: Unknown command type\\n\");
+            fprintf(stderr, "send_command_to_stm32: Unknown command type\n");
             return -1; // Unknown command
     }
-    printf(\"[To STM32]: %s\\n\", stm_command);
+    printf("[To STM32]: %s\n", stm_command);
 
     // write_to_serial sends the exact string, which is what the STM32 expects (terminated by ';')
     return write_to_serial(fd, stm_command);
