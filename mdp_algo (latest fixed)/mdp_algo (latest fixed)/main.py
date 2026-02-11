@@ -11,7 +11,13 @@ from algorithms.entities.grid import Grid
 from algorithms.entities.obstacle import Obstacle
 from algorithms.entities.robot import Robot
 from algorithms.pathfinding.hamiltonian import HamiltonianSolver
-from algorithms.utils.enums import Direction
+from algorithms.utils.enums import 
+
+# Accept 1-4 (N/E/S/W) input and map to internal 0/2/4/6
+DIR_MAP = {1: 0, 2: 2, 3: 4, 4: 6}
+
+def normalize_dir(value: int) -> int:
+    return DIR_MAP.get(value, value)
 
 app = FastAPI(title="MDP Algorithm Server")
 

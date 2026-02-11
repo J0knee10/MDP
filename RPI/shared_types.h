@@ -49,7 +49,8 @@ typedef struct {
 
 #define MAX_OBSTACLES 20
 #define MAX_COMMANDS 100
-#define MAX_SNAP_POSITIONS 20 // Assuming max snapshots equals max obstacles
+// An array to map integer directions to string representations for Android.
+extern const char* DIR_MAP_ANDROID_STR[8];
 
 // --- Threading and Shared State Management ---
 
@@ -73,6 +74,7 @@ typedef struct {
     int command_count;
     SnapPosition snap_positions[MAX_SNAP_POSITIONS]; // To store robot positions at snapshot events
     int snap_position_count; // Number of valid snap positions
+    int snap_position_idx;
 
     // File descriptors needed by multiple threads
     int android_fd;

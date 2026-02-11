@@ -9,6 +9,11 @@
 #include "rpi_hal.h"
 #include "json_parser.h" // New include
 
+// Definition for DIR_MAP_ANDROID_STR, declared in shared_types.h
+const char* DIR_MAP_ANDROID_STR[8] = {
+    "N", "NE", "E", "SE", "S", "SW", "W", "NW"
+};
+
 // --- Configuration ---
 #ifdef RPI_TESTING
 const char* STM32_DEVICE = "rpi_to_stm";

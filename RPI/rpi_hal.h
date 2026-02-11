@@ -3,6 +3,12 @@
 
 #include "shared_types.h"
 
+// Struct to hold data for curl's WriteMemoryCallback
+struct MemoryStruct {
+  char *memory;
+  size_t size;
+};
+
 /**
  * @file rpi_hal.h
  * @brief Hardware Abstraction Layer for RPi Robot Controller.
