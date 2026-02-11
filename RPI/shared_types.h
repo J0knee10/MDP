@@ -22,11 +22,21 @@ typedef struct {
     int id;
     int x;
     int y;
+    int d; // Direction (0=N, 2=E, 4=S, 6=W)
 } Obstacle;
+
+// Represents the robot's position and direction at a snapshot event.
+typedef struct {
+    int x;
+    int y;
+    int d; // Direction (0=N, 2=E, 4=S, 6=W)
+} SnapPosition;
+
 
 // Represents a single command in the navigation route.
 typedef enum {
     CMD_MOVE_FORWARD,
+    CMD_MOVE_BACKWARD, // Added for BW command
     CMD_TURN_LEFT,
     CMD_TURN_RIGHT,
     CMD_SNAPSHOT
@@ -34,11 +44,12 @@ typedef enum {
 
 typedef struct {
     CommandType type;
-    int value;
+    int value; // For move commands, this is distance; for turn, this is angle; for snapshot, this is obstacle ID.
 } Command;
 
 #define MAX_OBSTACLES 20
 #define MAX_COMMANDS 100
+#define MAX_SNAP_POSITIONS 20 // Assuming max snapshots equals max obstacles
 
 // --- Threading and Shared State Management ---
 
@@ -60,6 +71,8 @@ typedef struct {
     int obstacle_count;
     Command commands[MAX_COMMANDS];
     int command_count;
+    SnapPosition snap_positions[MAX_SNAP_POSITIONS]; // To store robot positions at snapshot events
+    int snap_position_count; // Number of valid snap positions
 
     // File descriptors needed by multiple threads
     int android_fd;
@@ -71,6 +84,7 @@ typedef struct {
 typedef struct {
     SharedAppContext* context; // Pointer to the shared context
     int obstacle_id;
+    SnapPosition robot_snap_position; // Robot's position at the time of snapshot
 } ImageTaskArgs;
 
 #endif // SHARED_TYPES_H

@@ -7,17 +7,18 @@
 
 #include "shared_types.h"
 #include "rpi_hal.h"
+#include "json_parser.h" // New include
 
 // --- Configuration ---
 #ifdef RPI_TESTING
 const char* STM32_DEVICE = "rpi_to_stm";
 const char* ANDROID_DEVICE = "android_to_rpi";
-const char* PATHFINDING_SERVER_URL = "http://127.0.0.1:4000/path";
+const char* PATHFINDING_SERVER_URL = "http://127.0.0.1:5000/path";
 const char* IMAGE_SERVER_URL = "http://127.0.0.1:5000/detect";
 #elif defined(FAKE_ANDROID_SIMULATION)
 const char* STM32_DEVICE = "/dev/ttyACM0";
 const char* ANDROID_DEVICE = "android_to_rpi";
-const char* PATHFINDING_SERVER_URL = "http://127.0.0.1:4000/path";
+const char* PATHFINDING_SERVER_URL = "http://127.0.0.1:5000/path";
 const char* IMAGE_SERVER_URL = "http://127.0.0.1:5000/detect";
 #else
 const char* STM32_DEVICE = "/dev/ttyACM0";
@@ -36,12 +37,13 @@ SharedAppContext g_app_context;
 // =================================================================================
 // THREAD 3: Image Processing (Temporary, "Fire-and-Forget")
 // =================================================================================
+// Updated post_image_to_server_thread to return response for parsing
 static int post_image_to_server_thread(int obstacle_id, char* response_buffer, int buffer_size) {
     CURL* curl;
     CURLcode res;
     int result = -1;
 
-    struct MemoryStruct { char *memory; size_t size; } chunk = { .memory = malloc(1), .size = 0 };
+    struct MemoryStruct chunk = { .memory = malloc(1), .size = 0 };
     if (chunk.memory == NULL) { // Check for malloc failure
         fprintf(stderr, "[ImgThread] Failed to allocate memory for CURL response.\n");
         return -1;
@@ -71,6 +73,8 @@ static int post_image_to_server_thread(int obstacle_id, char* response_buffer, i
                     response_buffer[buffer_size - 1] = '\0';
                 }
                 result = 0;
+            } else {
+                fprintf(stderr, "[ImgThread] Image server returned non-2xx response: %ld\n", code);
             }
         } else {
             fprintf(stderr, "[ImgThread] post_image_to_server_thread failed: %s\n", curl_easy_strerror(res));
@@ -86,16 +90,67 @@ static int post_image_to_server_thread(int obstacle_id, char* response_buffer, i
 
 void* process_image_thread(void* args) {
     ImageTaskArgs* task_args = (ImageTaskArgs*)args;
+    SharedAppContext* context = task_args->context;
+    char image_server_response[2048]; // Buffer for image server JSON response
+    char class_label[100]; // To hold the detected class label
 
     printf("[ImgThread] Capturing image for obstacle %d...\n", task_args->obstacle_id);
     if (capture_image(CAPTURE_FILENAME) != 0) {
         fprintf(stderr, "[ImgThread] Failed to capture image.\n");
     } else {
-        // The PC will handle displaying the processed image.
-        if (post_image_to_server_thread(task_args->obstacle_id, NULL, 0) == 0) {
-            printf("[ImgThread] ACK received from image server for obstacle %d.\n", task_args->obstacle_id);
+        // Send robot position to Android (Python's ROBOT,x,y,d)
+        char robot_pos_msg[100];
+        // Use +1 for x and y to match Python's 1-indexed coordinates for Android
+        const char* dir_str = (task_args->robot_snap_position.d >= 0 && task_args->robot_snap_position.d < 8) ?
+                               DIR_MAP_ANDROID_STR[task_args->robot_snap_position.d] : "U"; // U for unknown
+        snprintf(robot_pos_msg, sizeof(robot_pos_msg), "\"ROBOT,%d,%d,%s\"\n",
+                 task_args->robot_snap_position.x + 1, task_args->robot_snap_position.y + 1, dir_str);
+        send_message_to_android_with_ack(context->android_fd, robot_pos_msg);
+        printf("[ImgThread] Sent robot position to Android: %s", robot_pos_msg);
+
+
+        // Post image and get response
+        if (post_image_to_server_thread(task_args->obstacle_id, image_server_response, sizeof(image_server_response)) == 0) {
+            printf("[ImgThread] Image server response: %s\n", image_server_response);
+
+            // Parse response to get detected object and send to Android
+            int detected = 0;
+            // The JSON parsing for "detected" and "objects" array needs to be more robust.
+            // For now, using basic string searches as per json_parser.c implementation strategy.
+            if (get_json_int(image_server_response, "detected", &detected) == 0 && detected == 1) {
+                // Find the "objects" array and then the first object
+                const char* objects_array_start = strstr(image_server_response, "\"objects\":[");
+                if (objects_array_start) {
+                    objects_array_start += strlen("\"objects\":[");
+                    const char* first_obj_start = strchr(objects_array_start, '{');
+                    if (first_obj_start) {
+                        const char* first_obj_end = strchr(first_obj_start, '}');
+                        if (first_obj_end) {
+                            char single_obj_json[512]; // Temporary buffer for one object's JSON
+                            strncpy(single_obj_json, first_obj_start, first_obj_end - first_obj_start + 1);
+                            single_obj_json[first_obj_end - first_obj_start + 1] = '\0';
+
+                            // Extract class_label from the object JSON
+                            if (get_json_string(single_obj_json, "class_label", class_label, sizeof(class_label)) == 0 ||
+                                get_json_string(single_obj_json, "class", class_label, sizeof(class_label)) == 0) { // Try 'class' if 'class_label' not found
+                                int img_id = get_img_id_from_class_name(class_label);
+                                if (img_id != -1) {
+                                    send_target_result_to_android(context->android_fd, task_args->obstacle_id, img_id);
+                                    printf("[ImgThread] Sent image detection result to Android: obstacle_id=%d, class_label=%s, img_id=%d\n", task_args->obstacle_id, class_label, img_id);
+                                } else {
+                                    fprintf(stderr, "[ImgThread] Unknown class label received: %s\n", class_label);
+                                }
+                            } else {
+                                fprintf(stderr, "[ImgThread] Could not extract class label from image server response.\n");
+                            }
+                        }
+                    }
+                }
+            } else {
+                printf("[ImgThread] No object detected by image server for obstacle %d.\n", task_args->obstacle_id);
+            }
         } else {
-            fprintf(stderr, "[ImgThread] Failed to upload image or no ACK received.\n");
+            fprintf(stderr, "[ImgThread] Failed to upload image or no ACK received from image server.\n");
         }
     }
     free(task_args); // Free the dynamically allocated arguments
@@ -110,6 +165,10 @@ void* process_image_thread(void* args) {
 void execute_navigation() {
     SharedAppContext* context = &g_app_context;
     printf("[NavThread] State: [NAVIGATING]. Executing %d commands.\n", context->command_count);
+
+    pthread_mutex_lock(&context->lock);
+    context->snap_position_idx = 0; // Reset snap position index for new navigation
+    pthread_mutex_unlock(&context->lock);
 
     for (int i = 0; i < context->command_count; i++) {
         pthread_mutex_lock(&context->lock);
@@ -127,18 +186,35 @@ void execute_navigation() {
             printf("[NavThread] --- Spawning image thread for obstacle %d ---\n", cmd.value);
             pthread_t tid;
             ImageTaskArgs* args = malloc(sizeof(ImageTaskArgs));
+            if (!args) {
+                fprintf(stderr, "[NavThread] Failed to allocate ImageTaskArgs.\n");
+                continue;
+            }
             args->context = context;
             args->obstacle_id = cmd.value;
+            // Get current snap position from context
+            pthread_mutex_lock(&context->lock);
+            if (context->snap_position_idx < context->snap_position_count) {
+                args->robot_snap_position = context->snap_positions[context->snap_position_idx];
+                context->snap_position_idx++;
+            } else {
+                // Fallback if snap positions don't match commands, should not happen with correct parsing
+                args->robot_snap_position = (SnapPosition){.x = -1, .y = -1, .d = -1};
+                fprintf(stderr, "[NavThread] Warning: Snap position index out of bounds.\n");
+            }
+            pthread_mutex_unlock(&context->lock);
+
 
             pthread_create(&tid, NULL, process_image_thread, args);
-            pthread_detach(tid);
+            pthread_detach(tid); // Detach to allow thread to clean up its resources automatically
 
         } else {
             send_command_to_stm32(context->stm32_fd, cmd);
             sleep(1);
         }
     }
-    send_status_to_android(context->android_fd, "Navigation complete.");
+    // Using send_message_to_android_with_ack for navigation completion status
+    send_message_to_android_with_ack(context->android_fd, "\"Navigation complete.\"\n");
 }
 
 void* navigation_executor_thread(void* args) {
@@ -164,21 +240,36 @@ void* navigation_executor_thread(void* args) {
 
         if (context->state == STATE_PATHFINDING) {
             printf("[NavThread] State: [PATHFINDING]. Requesting route from server...\n");
-            char payload[2048] = "{\"obstacles\":[";
-            for (int i = 0; i < context->obstacle_count; i++) {
-                char obs_str[100];
-                snprintf(obs_str, sizeof(obs_str), "{\"id\":%d,\"x\":%d,\"y\":%d}", context->obstacles[i].id, context->obstacles[i].x, context->obstacles[i].y);
-                strcat(payload, obs_str); if (i < context->obstacle_count - 1) strcat(payload, ",");
-            }
-            strcat(payload, "]}");
+            char payload[2048];
+            char obstacles_str[1500] = ""; // To build the obstacles array string
 
-            char response[2048];
-            if (post_data_to_server(PATHFINDING_SERVER_URL, payload, response, sizeof(response)) == 0 &&
-                parse_command_route_from_server(response, context->commands, &context->command_count) == 0) {
-                send_status_to_android(context->android_fd, "Route calculated. Navigating.");
-                execute_navigation();
+            for (int i = 0; i < context->obstacle_count; i++) {
+                char obs_item[100]; // Buffer for a single obstacle JSON object
+                // Obstacle x, y are 0-indexed internally, server expects 0-indexed
+                // Direction 'd' is integer, server expects integer
+                snprintf(obs_item, sizeof(obs_item), "{\"id\":%d,\"x\":%d,\"y\":%d,\"d\":%d}",
+                         context->obstacles[i].id, context->obstacles[i].x, context->obstacles[i].y, context->obstacles[i].d);
+                strcat(obstacles_str, obs_item);
+                if (i < context->obstacle_count - 1) strcat(obstacles_str, ",");
+            }
+            
+            // Construct the full payload including robot initial state and retrying flag
+            // Default robot_x, robot_y, robot_dir as per dashboard.py and AlgorithmInput defaults
+            snprintf(payload, sizeof(payload), "{\"obstacles\":[%s],\"robot_x\":1,\"robot_y\":1,\"robot_dir\":0,\"retrying\":false}", obstacles_str);
+            printf("[NavThread] Pathfinding payload: %s\n", payload);
+
+            char response[4096]; // Increased response buffer size
+            if (post_data_to_server(PATHFINDING_SERVER_URL, payload, response, sizeof(response)) == 0) {
+                // Call the modified parse_command_route_from_server
+                if (parse_command_route_from_server(response, context->commands, &context->command_count,
+                                                    context->snap_positions, &context->snap_position_count) == 0) {
+                    send_message_to_android_with_ack(context->android_fd, "\"Route calculated. Navigating.\"\n"); // Using ack send
+                    execute_navigation();
+                } else {
+                    send_message_to_android_with_ack(context->android_fd, "\"Error: Pathfinding failed to parse route.\"\n"); // Using ack send
+                }
             } else {
-                send_status_to_android(context->android_fd, "Error: Pathfinding failed.");
+                send_message_to_android_with_ack(context->android_fd, "\"Error: Pathfinding server communication failed.\"\n"); // Using ack send
             }
         }
         
@@ -196,40 +287,60 @@ void* navigation_executor_thread(void* args) {
 
 void* android_listener_thread(void* args) {
     SharedAppContext* context = (SharedAppContext*)args;
-    char buffer[2048];
+    char buffer[2048]; // Buffer for incoming Android messages
 
     while (1) {
         printf("[AndroidThread] Listening for messages...\n");
-        int bytes_read = read(context->android_fd, buffer, sizeof(buffer) - 1);
+        // Blocking read until a message is received
+        ssize_t bytes_read = read(context->android_fd, buffer, sizeof(buffer) - 1);
 
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0';
             printf("[AndroidThread] Received: %s\n", buffer);
 
-            if (strncmp(buffer, "START", 5) == 0) {
-                pthread_mutex_lock(&context->lock);
-                if (context->state == STATE_IDLE) {
-                    if (parse_obstacle_map_from_android(buffer, context->obstacles, &context->obstacle_count) == 0) {
-                        context->new_map_received = true;
-                        send_status_to_android(context->android_fd, "Map received. Pathfinding...");
-                        pthread_cond_signal(&context->new_task_cond);
+            // Android JSON messages are expected to be enclosed in quotes and end with newline
+            // e.g., "START{\"obstacles\":[...]}"\n
+            if (buffer[0] == '"' && bytes_read >= 2 && buffer[bytes_read-2] == '"') { // Check for quotes and newline
+                // Remove outer quotes and newline for parsing
+                char* json_start = buffer + 1;
+                buffer[bytes_read-2] = '\0'; // Null-terminate before the last quote
+                
+                if (strncmp(json_start, "START", 5) == 0) {
+                    pthread_mutex_lock(&context->lock);
+                    if (context->state == STATE_IDLE) {
+                        // Pass the JSON part (after "START") to the new parser
+                        if (parse_android_map_and_obstacles(json_start + 5, context) == 0) {
+                            context->new_map_received = true;
+                            send_message_to_android_with_ack(context->android_fd, "\"Map received. Pathfinding...\"\n");
+                            pthread_cond_signal(&context->new_task_cond);
+                        } else {
+                            send_message_to_android_with_ack(context->android_fd, "\"Error: Invalid map format.\"\n");
+                        }
                     } else {
-                        send_status_to_android(context->android_fd, "Error: Invalid map format.");
+                         send_message_to_android_with_ack(context->android_fd, "\"Error: Robot is busy. Cannot start new mission.\"\n");
                     }
-                } else {
-                     send_status_to_android(context->android_fd, "Error: Robot is busy. Cannot start new mission.");
-                }
-                pthread_mutex_unlock(&context->lock);
+                    pthread_mutex_unlock(&context->lock);
 
-            } else if (strncmp(buffer, "STOP", 4) == 0) {
-                pthread_mutex_lock(&context->lock);
-                send_status_to_android(context->android_fd, "STOP command received.");
-                context->stop_requested = true;
-                if(context->state != STATE_IDLE) {
-                    pthread_cond_signal(&context->new_task_cond);
+                } else if (strncmp(json_start, "STOP", 4) == 0) {
+                    pthread_mutex_lock(&context->lock);
+                    send_message_to_android_with_ack(context->android_fd, "\"STOP command received.\"\n");
+                    context->stop_requested = true;
+                    if(context->state != STATE_IDLE) {
+                        pthread_cond_signal(&context->new_task_cond);
+                    }
+                    pthread_mutex_unlock(&context->lock);
+                } else {
+                    fprintf(stderr, "[AndroidThread] Unrecognized command from Android: %s\n", json_start);
                 }
-                pthread_mutex_unlock(&context->lock);
+            } else {
+                fprintf(stderr, "[AndroidThread] Malformed message from Android (missing quotes or newline): %s\n", buffer);
             }
+        } else if (bytes_read == 0) {
+            printf("[AndroidThread] Read 0 bytes, serial port might be closed or empty.\n");
+        } else {
+            perror("[AndroidThread] Error reading from serial port");
+            // Add a small delay to prevent busy-waiting on error
+            usleep(100000); // 100ms
         }
     }
     return NULL;
@@ -246,6 +357,9 @@ int main() {
     pthread_mutex_init(&g_app_context.lock, NULL);
     pthread_cond_init(&g_app_context.new_task_cond, NULL);
     g_app_context.state = STATE_IDLE;
+    g_app_context.snap_position_count = 0; // Initialize new fields
+    g_app_context.snap_position_idx = 0;   // Initialize new fields
+
 
     g_app_context.stm32_fd = init_serial_port(STM32_DEVICE, BAUD_RATE);
     g_app_context.android_fd = init_serial_port(ANDROID_DEVICE, BAUD_RATE);
@@ -272,113 +386,3 @@ int main() {
     curl_global_cleanup(); // Clean up curl once at application shutdown
     return 0;
 }
-
-/**
- * =================================================================================
- * HOW TO COMPILE AND RUN ON RASPBERRY PI (DEBIAN BUSTER OS)
- * =================================================================================
- *
- * This guide provides all the necessary steps to set up the environment,
- * compile the code, and run the application.
- *
- *
- * --- STEP 1: Install Dependencies ---
- *
- *   sudo apt-get update
- *   sudo apt-get install libcurl4-openssl-dev bluetooth bluez python3 libraspicam-dev
- *
- *
- * --- STEP 2: Configure Bluetooth (for live runs) ---
- *
- * 1. Start the bluetooth command-line tool: `bluetoothctl`
- * 2. Inside bluetoothctl, enter: `agent on`, `default-agent`, `scan on`
- * 3. Find your Android device's MAC address (e.g., AA:BB:CC:DD:EE:FF).
- * 4. Pair and trust it: `pair AA:BB:CC:DD:EE:FF`, `trust AA:BB:CC:DD:EE:FF`
- * 5. Exit bluetoothctl: `exit`
- * 6. Bind the device to /dev/rfcomm0: `sudo rfcomm bind 0 AA:BB:CC:DD:EE:FF 1`
- *
- *
- * --- STEP 3: Compile the Application ---
- *
- *   gcc -o control_center multithread_communication.c rpi_hal.c -I. -pthread -lcurl -Wall
- *
- *
- * --- STEP 4: Run the Application ---
- *
- *   Ensure you have permissions for serial ports, either by using `sudo` or by
- *   adding your user to the `dialout` group (`sudo usermod -a -G dialout $USER`
- *   then log out and back in).
- *
- *   sudo ./control_center
- *
- *
- * =================================================================================
- * HOW TO TEST THE APPLICATION (WITHOUT HARDWARE)
- * =================================================================================
- *
- * This procedure allows you to test the full application logic on your RPi
- * by faking the hardware components. You will need 4 terminal windows.
- *
- * --- In Terminal 1: Setup Fake Hardware Pipes ---
- *
- * Create two "named pipes". These are special files that let us redirect input
- * and output between processes.
- *
- *   mkfifo android_to_rpi
- *   mkfifo rpi_to_stm
- *
- *   # Now, listen on the fake STM pipe. This terminal will display commands
- *   # as the RPi application sends them.
- *   echo "--- Fake STM32 listening for commands... ---"
- *   cat < rpi_to_stm
- *
- *
- * --- In Terminal 2: Start Fake PC Servers ---
- *
- *   # In one command, start both Python fake servers in the background.
- *   python3 fake_path_server.py & python3 fake_image_server.py
- *
- *
- * --- In Terminal 3: Compile and Run the RPi App in Test Mode ---
- *
- *   # Compile the code with the RPI_TESTING flag.
- *   # This tells the code to use the named pipes instead of real serial ports.
- *   gcc -o test_center -DRPI_TESTING multithread_communication.c rpi_hal.c -I. -pthread -lcurl -Wall
- *   gcc -o STtest_center -DFAKE_ANDROID_SIMULATION multithread_communication.c rpi_hal.c -I. -pthread -lcurl -Wall   
- *   # Run the test version. It will start and wait for a command from the fake Android pipe.
- *   ./test_center
- *   ./STtest_center
- *
- *
- * --- In Terminal 4: Send Commands as Fake Android ---
- *
- *   # Wait until Terminal 3 shows "[AndroidThread] Listening...".
- *   # Then, send a START command with a map to begin the mission.
- *   echo 'START{"obstacles":[{"id":1,"x":10,"y":5}, {"id":2,"x":20,"y":30}, {"id":3,"x":5,"y":25}]}' > android_to_rpi
- *
- *
- * --- VERIFYING THE TEST ---
- *
- * 1.  **Logic Test:** As soon as you run the `echo` command in Terminal 4:
- *     - Terminal 3 (RPi App) should log that it received the map and is pathfinding.
- *     - Terminal 2 (Servers) should log that it received a path request.
- *     - Terminal 1 (Fake STM) should immediately start printing the robot commands:
- *       `FWD,5000,10;`
- *       `TURNR,4000,90;`
- *       ...etc.
- *
- * 2.  **Concurrency Test (Efficiency):**
- *     - When Terminal 1 prints a movement command that was *after* a snapshot, you
- *       should see NO 5-second delay. The robot moves on instantly.
- *     - A few seconds later, Terminal 3 (RPi App) will log that the image result
- *       was received and sent to Android.
- *     - This proves the image processing happened in the background without blocking navigation.
- *
- * 3.  **Concurrency Test (Responsiveness):**
- *     - While commands are streaming into Terminal 1, go to Terminal 4 and run:
- *       `echo 'STOP' > android_to_rpi`
- *     - The stream of commands in Terminal 1 should stop almost instantly, and the
- *       RPi app in Terminal 3 should log that it is aborting and returning to Idle.
- *       This proves the app is always responsive to high-priority commands.
- *
- */

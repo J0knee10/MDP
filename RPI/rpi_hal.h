@@ -16,12 +16,17 @@ int init_serial_port(const char* device, int baud_rate);
 
 // --- Android Communication ---
 int send_status_to_android(int fd, const char* status);
-int send_image_result_to_android(int fd, int obstacle_id, int recognized_image_id);
-int parse_obstacle_map_from_android(const char* json_string, Obstacle obstacles[], int* obstacle_count);
+// Changed from send_image_result_to_android to reflect "TARGET" command in Python
+int send_target_result_to_android(int fd, int obstacle_id, int recognized_image_id);
+// New function to parse the full Android JSON, including obstacles with 'd' and robot start position
+int parse_android_map_and_obstacles(const char* json_string, SharedAppContext* context);
+// New function for sending messages to Android with acknowledgment/retries
+int send_message_to_android_with_ack(int fd, const char* message);
 
 // --- PC/Server Communication ---
 int post_data_to_server(const char* url, const char* payload, char* response_buffer, int buffer_size);
-int parse_command_route_from_server(const char* json_string, Command commands[], int* command_count);
+// Modified to pass SharedAppContext to store snap_positions and robot initial position
+int parse_command_route_from_server(const char* json_string, Command commands[], int* command_count, SnapPosition snap_positions[], int* snap_position_count);
 
 // --- STM32 Communication ---
 int send_command_to_stm32(int fd, Command command);

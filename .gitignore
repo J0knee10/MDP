@@ -1,23 +1,26 @@
+# Build artifacts
 *.bin
 *.exe
-.vscode
-*.log
 *.elf
+*.hex
+*.axf
 *.map
 *.list
-*.mp4
-*.obj
-.venv
-.metadata/
-*.obj
 *.o
+*.obj
 *.d
 *.su
 *.cyclo
-*.hex
-*.axf
 *.crf
 *.htm
-*.mkd
-*.mk
-.venv
+
+# Logs / media
+*.log
+*.mp4
+
+# IDE / editor
+.vscode/
+.metadata/
+
+# Python
+.venv/

@@ -8,11 +8,53 @@
 #include <stdint.h>
 #include <errno.h>
 #include <curl/curl.h>
+#include <time.h> // For usleep in send_message_to_android_with_ack
+
+#include "json_parser.h" // New include for JSON parsing helpers
 
 /**
  * @file rpi_hal.c
  * @brief Implements the Hardware Abstraction Layer for the RPi Robot Controller.
  */
+
+// --- Configuration for Android Communication ---
+#define ANDROID_COMM_MAX_RETRIES 3
+#define ANDROID_COMM_RETRY_DELAY_US 300000 // 300ms
+
+// --- Mappings from Python task1.py ---
+// These are static and internal to rpi_hal.c
+
+// Maps direction integer (0=N, 2=E, 4=S, 6=W) to string
+static const char* DIR_MAP_ANDROID_STR[] = {
+    "N", NULL, "E", NULL, "S", NULL, "W", NULL
+};
+
+// Maps class names to image IDs
+static const struct {
+    const char* class_name;
+    int img_id;
+} IMAGE_MAPPING_C[] = {
+    {"Number 1", 11}, {"Number 2", 12}, {"Number 3", 13}, {"Number 4", 14},
+    {"Number 5", 15}, {"Number 6", 16}, {"Number 7", 17}, {"Number 8", 18},
+    {"Number 9", 19}, {"Alphabet A", 20}, {"Alphabet B", 21}, {"Alphabet C", 22},
+    {"Alphabet D", 23}, {"Alphabet E", 24}, {"Alphabet F", 25}, {"Alphabet G", 26},
+    {"Alphabet H", 27}, {"Alphabet S", 28}, {"Alphabet T", 29}, {"Alphabet U", 30},
+    {"Alphabet V", 31}, {"Alphabet W", 32}, {"Alphabet X", 33}, {"Alphabet Y", 34},
+    {"Alphabet Z", 35}, {"Up Arrow", 36}, {"Down Arrow", 37}, {"Right Arrow", 38},
+    {"Left Arrow", 39}, {"Stop sign", 40}
+};
+static const size_t IMAGE_MAPPING_COUNT = sizeof(IMAGE_MAPPING_C) / sizeof(IMAGE_MAPPING_C[0]);
+
+// Function to map class name string to image ID
+int get_img_id_from_class_name(const char* class_name) {
+    for (size_t i = 0; i < IMAGE_MAPPING_COUNT; i++) {
+        if (strcmp(IMAGE_MAPPING_C[i].class_name, class_name) == 0) {
+            return IMAGE_MAPPING_C[i].img_id;
+        }
+    }
+    return -1; // Not found
+}
+
 
 // --- Internal Helper Functions ---
 
@@ -103,37 +145,42 @@ int init_serial_port(const char* device, int baud_rate) {
 
 int send_status_to_android(int fd, const char* status) {
     char buffer[256];
-    // Format: {"type": "status", "value": "message"}\n
+    // Format: {"type": "status", "value": "\"message\""}\n (message itself is quoted)
     snprintf(buffer, sizeof(buffer), "{\"type\": \"status\", \"value\": \"%s\"}\n", status);
     return write_to_serial(fd, buffer);
 }
 
-int send_image_result_to_android(int fd, int obstacle_id, int recognized_image_id) {
-    char buffer[256];
-    // Format: {"type": "image_result", "obstacle_id": 1, "image_id": 11}\n
-    snprintf(buffer, sizeof(buffer), "{\"type\": \"image_result\", \"obstacle_id\": %d, \"image_id\": %d}\n", obstacle_id, recognized_image_id);
-    return write_to_serial(fd, buffer);
+// New function: Sends a message to Android with retries (mimics Python's send_with_ack)
+int send_message_to_android_with_ack(int fd, const char* message) {
+    for (int attempt = 0; attempt < ANDROID_COMM_MAX_RETRIES; attempt++) {
+        printf("[AndroidComm] Attempt %d: Sending %s", attempt + 1, message);
+        if (write_to_serial(fd, message) == 0) {
+            // For now, we assume success after writing.
+            // A full ACK mechanism would involve reading from 'fd' for a response.
+            return 0; // Success
+        }
+        usleep(ANDROID_COMM_RETRY_DELAY_US); // Delay before retry
+    }
+    fprintf(stderr, "[AndroidComm] Failed to send message after %d attempts: %s", ANDROID_COMM_MAX_RETRIES, message);
+    return -1; // Failure
 }
 
-int parse_obstacle_map_from_android(const char* json_string, Obstacle obstacles[], int* obstacle_count) {
-    // Expects a simple JSON format: {"obstacles": [{"id":1,"x":10,"y":5}, ...]}
-    *obstacle_count = 0;
-    char* temp_str = strdup(json_string); // Make a copy to modify with strtok
 
-    char* token = strtok(temp_str, "{}[],:\" "); // Characters to split by
-    while(token != NULL && *obstacle_count < MAX_OBSTACLES) {
-        if (strcmp(token, "id") == 0) {
-            obstacles[*obstacle_count].id = atoi(strtok(NULL, "{}[],:\" "));
-        } else if (strcmp(token, "x") == 0) {
-            obstacles[*obstacle_count].x = atoi(strtok(NULL, "{}[],:\" "));
-        } else if (strcmp(token, "y") == 0) {
-            obstacles[*obstacle_count].y = atoi(strtok(NULL, "{}[],:\" "));
-            (*obstacle_count)++; // Increment after finding the last member of the struct
-        }
-        token = strtok(NULL, "{}[],:\" ");
-    }
-    free(temp_str);
-    return (*obstacle_count > 0) ? 0 : -1;
+// New function: send_target_result_to_android (replaces old send_image_result_to_android)
+int send_target_result_to_android(int fd, int obstacle_id, int recognized_image_id) {
+    char buffer[256];
+    char json_buffer[512]; // Buffer to hold the full JSON string
+    // Python format: resp = "TARGET," + str(object_id) + "," + str(class_name)
+    // Then json.dumps(resp) + "\n"
+    snprintf(buffer, sizeof(buffer), "TARGET,%d,%d", obstacle_id, recognized_image_id);
+    snprintf(json_buffer, sizeof(json_buffer), "\"%s\"\n", buffer); // Enclose in quotes and add newline
+
+    return send_message_to_android_with_ack(fd, json_buffer);
+}
+
+// New function: parse_android_map_and_obstacles (replaces old parse_obstacle_map_from_android)
+int parse_android_map_and_obstacles(const char* json_string, SharedAppContext* context) {
+    return parse_android_map_json(json_string, context);
 }
 
 
@@ -148,7 +195,7 @@ int post_data_to_server(const char* url, const char* payload, char* response_buf
     chunk.memory = malloc(1);
     chunk.size = 0;
 
-    curl_global_init(CURL_GLOBAL_ALL);
+    // curl_global_init(CURL_GLOBAL_ALL); // This is now done once in main
     curl = curl_easy_init();
     if (curl) {
         struct curl_slist *headers = NULL;
@@ -171,44 +218,29 @@ int post_data_to_server(const char* url, const char* payload, char* response_buf
                 strncpy(response_buffer, chunk.memory, buffer_size - 1);
                 response_buffer[buffer_size - 1] = '\0';
                 result = 0; // Success
+            } else {
+                fprintf(stderr, "post_data_to_server received non-2xx response: %ld\n", response_code);
             }
         }
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
+    } else {
+        fprintf(stderr, "post_data_to_server: curl_easy_init() failed.\n");
     }
     free(chunk.memory);
-    curl_global_cleanup();
+    // curl_global_cleanup(); // This is now done once in main
     return result;
 }
 
-int parse_command_route_from_server(const char* json_string, Command commands[], int* command_count) {
-    // Expects: {"route": [{"type":"FW", "value":10}, {"type":"TR"}, ...]}
-    *command_count = 0;
-    char* temp_str = strdup(json_string); // Copy for strtok
-
-    char* token = strtok(temp_str, "{}[],:\" ");
-    while (token != NULL && *command_count < MAX_COMMANDS) {
-        if (strcmp(token, "type") == 0) {
-            char* type_str = strtok(NULL, "{}[],:\" ");
-            if (strcmp(type_str, "FW") == 0) commands[*command_count].type = CMD_MOVE_FORWARD;
-            else if (strcmp(type_str, "TL") == 0) commands[*command_count].type = CMD_TURN_LEFT;
-            else if (strcmp(type_str, "TR") == 0) commands[*command_count].type = CMD_TURN_RIGHT;
-            else if (strcmp(type_str, "SS") == 0) commands[*command_count].type = CMD_SNAPSHOT;
-        } else if (strcmp(token, "value") == 0) {
-            commands[*command_count].value = atoi(strtok(NULL, "{}[],:\" "));
-            (*command_count)++; // Finished a command
-        }
-        token = strtok(NULL, "{}[],:\" ");
-    }
-
-    free(temp_str);
-    return (*command_count > 0) ? 0 : -1;
+// Modified parse_command_route_from_server
+int parse_command_route_from_server(const char* json_string, Command commands[], int* command_count, SnapPosition snap_positions[], int* snap_position_count) {
+    return parse_route_json(json_string, commands, command_count, snap_positions, snap_position_count);
 }
 
 // --- STM32 Communication ---
 
 int send_command_to_stm32(int fd, Command command) {
-    char stm_command[64];
+    char stm_command[128];
     static uint32_t cmd_id_counter = 0; // Static to maintain ID across calls
     const int DEFAULT_MOVE_SPEED_PERCENTAGE = 70; // 70% speed (will be * 71 on STM32)
     const int DEFAULT_TURN_SPEED_PERCENTAGE = 60; // 60% speed (will be * 71 on STM32)
@@ -218,31 +250,33 @@ int send_command_to_stm32(int fd, Command command) {
     switch (command.type) {
         case CMD_MOVE_FORWARD:
             // STM32 format: :<cmdid>/MOTOR/FWD/<param1Speed>/<param2DistAngle>;
-            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/FWD/%d/%d;", 
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/FWD/%d/%d;",
+                     cmd_id_counter, DEFAULT_MOVE_SPEED_PERCENTAGE, command.value);
+            break;
+        case CMD_MOVE_BACKWARD: // Added for BW command
+            // STM32 format: :<cmdid>/MOTOR/BWD/<param1Speed>/<param2DistAngle>;
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/BWD/%d/%d;",
                      cmd_id_counter, DEFAULT_MOVE_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_TURN_LEFT:
             // STM32 format: :<cmdid>/MOTOR/TURNL/<param1Speed>/<param2DistAngle>;
-            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNL/%d/%d;", 
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNL/%d/%d;",
                      cmd_id_counter, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_TURN_RIGHT:
             // STM32 format: :<cmdid>/MOTOR/TURNR/<param1Speed>/<param2DistAngle>;
-            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNR/%d/%d;", 
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNR/%d/%d;",
                      cmd_id_counter, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_SNAPSHOT:
-            // Snapshots are handled by the RPi itself and are not sent to the STM32.
-            // For now, these are not commands for the STM32.
             printf("[To STM32]: Skipping snapshot command (handled by RPi).\n");
             return 0; // Indicate success but no command sent to STM32
         default:
-            fprintf(stderr, "send_command_to_stm32: Unknown command type\n");
+            fprintf(stderr, "send_command_to_stm32: Unknown command type (%d)\n", command.type);
             return -1; // Unknown command
     }
-    printf("[To STM32]: %s\n", stm_command);
+    printf("[To STM32]: %s\n", stm_command); // Add newline for clear logging, STM32 expects ';' as terminator
 
-    // write_to_serial sends the exact string, which is what the STM32 expects (terminated by ';')
     return write_to_serial(fd, stm_command);
 }
 
@@ -257,7 +291,7 @@ int capture_image(const char* filename) {
         // Write a minimal valid JPEG header (or just some dummy content)
         // This is a very simplified placeholder. A real dummy JPEG would be larger.
         // For testing the *flow*, an empty file or a small dummy is usually enough.
-        fprintf(fp, "Fake JPEG content for %s", filename); 
+        fprintf(fp, "Fake JPEG content for %s", filename);
         fclose(fp);
         return 0; // Success
     } else {
@@ -271,7 +305,8 @@ int capture_image(const char* filename) {
     // -t 200: Take picture after 200ms delay (gives camera time to adjust)
     // -w 640 -h 480: Set resolution
     // -o: Output file
-    snprintf(command, sizeof(command), "raspistill -n -t 200 -w 640 -h 480 -o %s", filename);
+    // Added -q 75 for quality to reduce file size slightly, though not critical for function
+    snprintf(command, sizeof(command), "raspistill -n -t 200 -w 640 -h 480 -q 75 -o %s", filename);
     printf("[Camera] Executing command: %s\n", command);
     int result = system(command);
     if (result == 0) {
@@ -282,5 +317,3 @@ int capture_image(const char* filename) {
     return result;
 #endif
 }
-
-
