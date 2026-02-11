@@ -669,7 +669,7 @@ uint8_t motorPidForward(MotorCommand_t cmd, uint8_t isStateChanged) {
 	// MotorA & MotorB speed difference fix
 	float headingError = totalDistanceA - totalDistanceB;
 	const float Kp_heading = 1.0f;
-	const float Ki_heading = 0.01f;
+	const float Ki_heading = 1.0f;
 	const float Kd_heading = 1.0f;
 
 	headingIntegral += headingError;

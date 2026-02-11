@@ -64,8 +64,8 @@ all: main-build
 main-build: MDP_test.elf secondary-outputs
 
 # Tool invocations
-MDP_test.elf MDP_test.map: $(OBJS) $(USER_OBJS) D:\Jon\Uni\MDP\STM\MDP_test\STM32F407VETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "MDP_test.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"D:\Jon\Uni\MDP\STM\MDP_test\STM32F407VETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="MDP_test.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
+MDP_test.elf MDP_test.map: $(OBJS) $(USER_OBJS) C:\Jon\Uni\ stuff\CE\MDP\STM\MDP_test\STM32F407VETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "MDP_test.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"C:\Jon\Uni stuff\CE\MDP\STM\MDP_test\STM32F407VETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="MDP_test.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
