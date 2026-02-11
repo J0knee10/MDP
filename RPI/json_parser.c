@@ -100,8 +100,36 @@ int parse_android_map_json(const char* json_string, SharedAppContext* context) {
         if (*current_obs_str == ',') current_obs_str++; // Skip comma if present
     }
 
-    // Robot initial position/direction are hardcoded in Python, not parsed from Android
-    // For now, these won't be set from Android JSON in C.
+    // Parse robot_x, robot_y, robot_direction
+    int robot_x_val = 1; // Default to 1 (0-indexed)
+    int robot_y_val = 1; // Default to 1 (0-indexed)
+    int robot_dir_val = 0; // Default to 0 (North)
+
+    if (get_json_int(json_string, "robot_x", &robot_x_val) != 0) {
+        fprintf(stderr, "Could not parse robot_x, using default.\n");
+    }
+    if (get_json_int(json_string, "robot_y", &robot_y_val) != 0) {
+        fprintf(stderr, "Could not parse robot_y, using default.\n");
+    }
+
+    int android_dir = 0;
+    if (get_json_int(json_string, "robot_direction", &android_dir) == 0) {
+        // Map Android's 1=N, 2=E, 3=S, 4=W to RPi's 0,2,4,6
+        switch (android_dir) {
+            case 1: robot_dir_val = 0; break; // North
+            case 2: robot_dir_val = 2; break; // East
+            case 3: robot_dir_val = 4; break; // South
+            case 4: robot_dir_val = 6; break; // West
+            default: robot_dir_val = 0; break; // Default to North if unknown or invalid
+        }
+    } else {
+        fprintf(stderr, "Could not parse robot_direction, using default.\n");
+    }
+
+    // Adjust coordinates from Android's 1-indexed to RPi's 0-indexed
+    context->robot_start_x = robot_x_val - 1;
+    context->robot_start_y = robot_y_val - 1;
+    context->robot_start_dir = robot_dir_val;
 
     return 0; // Success
 }

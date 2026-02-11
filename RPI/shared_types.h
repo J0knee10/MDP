@@ -54,6 +54,8 @@ extern const char* DIR_MAP_ANDROID_STR[8];
 
 // --- Threading and Shared State Management ---
 
+#define MAX_SNAP_POSITIONS 100
+
 // A structure to hold all application state that is shared between threads.
 // Access to this struct MUST be protected by the mutex.
 typedef struct {
@@ -70,6 +72,9 @@ typedef struct {
     // Data for the current mission
     Obstacle obstacles[MAX_OBSTACLES];
     int obstacle_count;
+    int robot_start_x;
+    int robot_start_y;
+    int robot_start_dir; // Initial robot direction for pathfinding
     Command commands[MAX_COMMANDS];
     int command_count;
     SnapPosition snap_positions[MAX_SNAP_POSITIONS]; // To store robot positions at snapshot events

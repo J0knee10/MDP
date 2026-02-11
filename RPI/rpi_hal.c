@@ -239,24 +239,30 @@ int parse_command_route_from_server(const char* json_string, Command commands[],
 
 // --- STM32 Communication ---
 
-int send_command_to_stm32(int fd, Command command) {
+int send_command_to_stm32(int fd, Command command, uint32_t external_cmd_id) {
     char stm_command[128];
-    static uint32_t cmd_id_counter = 0; // Static to maintain ID across calls
-    const int DEFAULT_MOVE_SPEED_PERCENTAGE = 70; // 70% speed (will be * 71 on STM32)
-    const int DEFAULT_TURN_SPEED_PERCENTAGE = 60; // 60% speed (will be * 71 on STM32)
+    static uint32_t internal_cmd_id_counter = 0; // Static to maintain ID across calls
+    const int DEFAULT_MOVE_SPEED_PERCENTAGE = 70; // 70% speed
+    const int DEFAULT_TURN_SPEED_PERCENTAGE = 60; // 60% speed
 
-    cmd_id_counter++; // Increment for each new command
+    uint32_t cmd_id_to_use;
+    if (external_cmd_id != 0) {
+        cmd_id_to_use = external_cmd_id;
+    } else {
+        internal_cmd_id_counter++;
+        cmd_id_to_use = internal_cmd_id_counter;
+    }
 
     switch (command.type) {
         case CMD_MOVE_FORWARD:
             // STM32 format: :<cmdid>/MOTOR/FWD/<param1Speed>/<param2DistAngle>;
             snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/FWD/%d/%d;",
-                     cmd_id_counter, DEFAULT_MOVE_SPEED_PERCENTAGE, command.value);
+                     cmd_id_to_use, DEFAULT_MOVE_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_MOVE_BACKWARD: // Added for BW command
             // STM32 format: :<cmdid>/MOTOR/BWD/<param1Speed>/<param2DistAngle>;
             snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/BWD/%d/%d;",
-                     cmd_id_counter, DEFAULT_MOVE_SPEED_PERCENTAGE, command.value);
+                     cmd_id_to_use, DEFAULT_MOVE_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_TURN_LEFT:
             // STM32 format: :<cmdid>/MOTOR/TURNL/<param1Speed>/<param2DistAngle>;

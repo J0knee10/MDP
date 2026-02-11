@@ -27,8 +27,19 @@ class FakeImageServer(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            # Return an explicit ACK
-            response = f'{{"status": "ACK"}}'
+            # Return a simulated detection response
+            response = f'''
+{{
+    "detected": 1,
+    "objects": [
+        {{
+            "class_label": "test_object_{obstacle_id}",
+            "confidence": 0.95,
+            "box": [10, 20, 30, 40]
+        }}
+    ]
+}}
+            '''
             
             self.wfile.write(response.encode('utf-8'))
             print(f"[Fake Img Server] Sent response: {response}")

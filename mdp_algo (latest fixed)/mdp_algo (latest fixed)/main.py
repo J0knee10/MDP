@@ -11,7 +11,7 @@ from algorithms.entities.grid import Grid
 from algorithms.entities.obstacle import Obstacle
 from algorithms.entities.robot import Robot
 from algorithms.pathfinding.hamiltonian import HamiltonianSolver
-from algorithms.utils.enums import 
+from algorithms.utils.enums import Direction
 
 # Accept 1-4 (N/E/S/W) input and map to internal 0/2/4/6
 DIR_MAP = {1: 0, 2: 2, 3: 4, 4: 6}
@@ -52,10 +52,20 @@ class PathPoint(BaseModel):
     d: int
     s: int
 
+class SnapPosition(BaseModel):
+    x: int
+    y: int
+    d: int
+
 class AlgorithmOutput(BaseModel):
     commands: List[str]
     path: List[PathPoint]
     distance: float
+    snap_positions: List[SnapPosition]
+
+class AlgorithmResponse(BaseModel):
+    data: AlgorithmOutput
+    error: Optional[str] = None
 
 # --- CORE ALGORITHM ORCHESTRATOR ---
 
@@ -100,18 +110,27 @@ def run_algorithm(obstacles_data: List[dict], robot_x: int, robot_y: int, robot_
     # Based on my previous fix, generate_commands calls compress, so we are good.
     
     # 6. Format Output
+    path_points = [
+        {
+            "x": s.x, 
+            "y": s.y, 
+            "d": int(s.direction), 
+            "s": s.screenshot_id
+        } 
+        for s in full_path
+    ]
+
+    snap_positions = [
+        {"x": p["x"], "y": p["y"], "d": p["d"]}
+        for p in path_points
+        if p["s"] != -1
+    ]
+
     return {
         "commands": raw_commands,
-        "path": [
-            {
-                "x": s.x, 
-                "y": s.y, 
-                "d": int(s.direction), 
-                "s": s.screenshot_id
-            } 
-            for s in full_path
-        ],
-        "distance": total_cost
+        "path": path_points,
+        "distance": total_cost,
+        "snap_positions": snap_positions,
     }
 
 # --- API ENDPOINTS ---
@@ -120,12 +139,12 @@ def run_algorithm(obstacles_data: List[dict], robot_x: int, robot_y: int, robot_
 def health_check():
     return {"status": "ok", "message": "Algorithm server is running (90-Degree Logic)"}
 
-@app.post("/path", response_model=AlgorithmOutput)
+@app.post("/path", response_model=AlgorithmResponse)
 def compute_path(input_data: AlgorithmInput):
     try:
         # Map Pydantic model to list of dicts
         obstacles_data = [
-            {"id": o.id, "x": o.x, "y": o.y, "d": o.d} 
+            {"id": o.id, "x": o.x, "y": o.y, "d": normalize_dir(o.d)} 
             for o in input_data.obstacles
         ]
         
@@ -133,10 +152,10 @@ def compute_path(input_data: AlgorithmInput):
             obstacles_data,
             input_data.robot_x,
             input_data.robot_y,
-            input_data.robot_dir,
+            normalize_dir(input_data.robot_dir),
             input_data.retrying
         )
-        return result
+        return {"data": result, "error": None}
         
     except Exception as e:
         import traceback

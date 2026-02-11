@@ -1,7 +1,3 @@
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import signal
-import sys
-
 class FakePathServer(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/path':
@@ -11,19 +7,38 @@ class FakePathServer(BaseHTTPRequestHandler):
             self.end_headers()
             # A long route with moves and snapshots to test concurrency
             response = """
-            {
-                "route": [
-                    {"type":"FW", "value":10},
-                    {"type":"TR", "value":90},
-                    {"type":"SS", "value":1},
-                    {"type":"FW", "value":15},
-                    {"type":"TL", "value":90},
-                    {"type":"SS", "value":2},
-                    {"type":"FW", "value":20},
-                    {"type":"SS", "value":3},
-                    {"type":"FW", "value":5}
-                ]
-            }
+{
+    "data": {
+        "commands": [
+            "FW10",
+            "TR90",
+            "SP1",
+            "FW15",
+            "TL90",
+            "SP2",
+            "FW20",
+            "SP3",
+            "FW5"
+        ],
+        "path": [
+            {"x": 0, "y": 0, "d": 0, "s": -1},
+            {"x": 0, "y": 1, "d": 0, "s": -1},
+            {"x": 1, "y": 1, "d": 2, "s": -1},
+            {"x": 1, "y": 2, "d": 2, "s": 1},
+            {"x": 2, "y": 2, "d": 0, "s": -1},
+            {"x": 2, "y": 3, "d": 0, "s": 2},
+            {"x": 3, "y": 3, "d": 2, "s": -1},
+            {"x": 3, "y": 4, "d": 2, "s": 3},
+            {"x": 4, "y": 4, "d": 0, "s": -1}
+        ],
+        "distance": 100.0,
+        "snap_positions": [
+            {"x": 1, "y": 2, "d": 2},
+            {"x": 2, "y": 3, "d": 0},
+            {"x": 3, "y": 4, "d": 2}
+        ]
+    }
+}
             """
             self.wfile.write(response.encode('utf-8'))
         else:
@@ -31,21 +46,6 @@ class FakePathServer(BaseHTTPRequestHandler):
             self.end_headers()
 
 def run_path_server():
-    server_address = ('0.0.0.0', 4000)
+    server_address = ('0.0.0.0', 5000) # Changed to port 5000
     httpd = HTTPServer(server_address, FakePathServer)
-    print('Fake Pathfinding Server running on http://localhost:4000 ...')
-
-    # Define a handler to gracefully shutdown
-    def signal_handler(sig, frame):
-        print("\n[Fake Path Server] KeyboardInterrupt received, shutting down server...")
-        httpd.shutdown()  # stops serve_forever
-        httpd.server_close()  # closes the socket
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-
-    # Start serving
-    httpd.serve_forever()
-
-if __name__ == '__main__':
-    run_path_server()
+    print('Fake Pathfinding Server running on http://localhost:5000 ...') # Changed port in print

@@ -31,13 +31,6 @@ DIR_MAP_ANDROID = {
   6: "W"
 }
 
-TURN_MAP = {
-  "FR": "right",
-  "FL": "left",
-  "BR": "right",
-  "BL": "left",
-}
-
 DIRECTION = {
   "FW": "forward",
   "BW": "reverse",
@@ -144,29 +137,11 @@ def send_image_to_server(image_stream, object_id, ser_android):
                         class_name = selected_obj.get("class", "Unkown")
                         confidence = selected_obj.get("confidence", 0) * 100
 
-                        #obj = objects[0]
-                        #class_name = obj.get("class", "Unknown")
-                        #confidence = obj.get("confidence", 0) * 100
-
-                        #android_response = {
-                        #  "type": "IMAGE_RESULTS",
-                        #  "data": {
-                        #    "obs_id": object_id,
-                        #    "img_id": class_name,
-                        #  }
-                        #}
-
-
                         print(
                             f"\n✓ SUCCESS! Detected: {class_name} (confidence: {confidence:.1f}%)"
                         )
 
                         if ser_android and ser_android.is_open:
-                            #data = android_response["data"]
-                            #data["img_id"] = IMAGE_MAPPING[data["img_id"]]
-                            #resp_str = json.dumps(android_response) + "\n"
-                            #print(resp_str)
-                            #ser_android.write(resp_str.encode("utf-8"))
                             class_key = class_name
                             if isinstance(class_name, str) and " - " in class_name:
                               class_key = class_name.split(" - ", 1)[0].strip()
@@ -213,11 +188,26 @@ def parseJson_Android(data: str) -> dict:
 
     obstacles = []
     for obs in parsed.get("value", {}).get("obstacles", []):
+        obs_id = int(obs.get("id", -1))
+        if obs_id <= 0:
+            # Ignore deleted/placeholder obstacles
+            continue
+
+        raw_dir = obs.get("dir", obs.get("d"))
+        if isinstance(raw_dir, int):
+            # Accept 1=N,2=E,3=S,4=W from Android
+            dir_val = {1: 0, 2: 2, 3: 4, 4: 6}.get(raw_dir, -1)
+        else:
+            dir_val = DIR_MAP.get(raw_dir, -1)  # N/E/S/W strings
+        if dir_val == -1:
+            # Skip invalid directions
+            continue
+
         new_obs = {
-            "id": int(obs["id"]),
+            "id": obs_id,
             "x": obs["x"] - 1,   # shift by -1
             "y": obs["y"] - 1,   # shift by -1
-            "d": DIR_MAP.get(obs["dir"], -1)  # default -1 if unknown
+            "d": dir_val  # default -1 if unknown
         }
         obstacles.append(new_obs)
 
@@ -258,12 +248,30 @@ def send_coordinates_to_server(json_data):
 def parse_route_response(route_response):
     """Parse the route server response and extract path and commands"""
     try:
-        data = route_response.get("data", {})
+        data = route_response.get("data")
+        if not isinstance(data, dict):
+            # Accept top-level response format as well
+            data = route_response
+
         path = data.get("path", [])
         commands = data.get("commands", [])
         distance = data.get("distance", 0)
         global snap_positions
         snap_positions = data.get("snap_positions", [])
+        if not snap_positions and path:
+            # Derive snap positions from path when not provided
+            derived = []
+            for point in path:
+                screenshot_id = point.get("s", point.get("screenshot_id", -1))
+                if screenshot_id != -1:
+                    derived.append(
+                        {
+                            "x": point.get("x"),
+                            "y": point.get("y"),
+                            "d": point.get("d"),
+                        }
+                    )
+            snap_positions = derived
 
         print(f"\n✓ Route parsed successfully:")
         print(f"  Distance: {distance}")
@@ -284,6 +292,9 @@ def parse_and_send_command(command, ser_stm32, picam2, ser_android):
         print("🚀 Command execution finished")
         return True
 
+    if command.startswith("SNAP"):
+        command = "SP" + command[4:]
+
     cmd_type = command[:2]
     cmd_val = command[2:]
 
@@ -293,11 +304,12 @@ def parse_and_send_command(command, ser_stm32, picam2, ser_android):
         if picam2:
           img = capture_image(picam2)
           global snap_positions
-          snap_position_coord=snap_positions.pop(0)
-          resp = "ROBOT," + str(int(snap_position_coord.get("x"))) + "," + str(int(snap_position_coord.get("y"))) + "," + str(DIR_MAP_ANDROID.get(snap_position_coord.get("d")))
-          print(resp)
-          resp = json.dumps(resp) + "\n"
-          ser_android.write(resp.encode("utf-8"))
+          if snap_positions:
+              snap_position_coord = snap_positions.pop(0)
+              resp = "ROBOT," + str(int(snap_position_coord.get("x"))) + "," + str(int(snap_position_coord.get("y"))) + "," + str(DIR_MAP_ANDROID.get(snap_position_coord.get("d")))
+              print(resp)
+              resp = json.dumps(resp) + "\n"
+              ser_android.write(resp.encode("utf-8"))
         send_image_to_server(img, obj_id, ser_android)
         return False
 
@@ -344,7 +356,7 @@ def listen_for_coordinates(ser_android, ser_stm32, picam2):
                         route_response = send_coordinates_to_server(json_data)
 
                         if route_response:
-                            path_data, commands_list = parse_route_response(
+                            _, commands_list = parse_route_response(
                                 route_response
                             )
 

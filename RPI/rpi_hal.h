@@ -35,7 +35,7 @@ int post_data_to_server(const char* url, const char* payload, char* response_buf
 int parse_command_route_from_server(const char* json_string, Command commands[], int* command_count, SnapPosition snap_positions[], int* snap_position_count);
 
 // --- STM32 Communication ---
-int send_command_to_stm32(int fd, Command command);
+int send_command_to_stm32(int fd, Command command, uint32_t external_cmd_id);
 
 // --- Camera/Image Processing ---
 int capture_image(const char* filename);
