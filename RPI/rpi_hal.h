@@ -42,5 +42,6 @@ int capture_image(const char* filename);
 
 // --- Helper functions ---
 size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp);
+int get_img_id_from_class_name(const char* class_name);
 
 #endif // RPI_HAL_H

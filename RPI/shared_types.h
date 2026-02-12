@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 /**
  * @file shared_types.h
@@ -84,6 +85,16 @@ typedef struct {
     // File descriptors needed by multiple threads
     int android_fd;
     int stm32_fd;
+
+    // STM32 ACK synchronization
+    volatile uint32_t stm32_last_ack_id;
+    pthread_mutex_t stm32_ack_mutex;
+    pthread_cond_t stm32_ack_cond;
+
+    // Image capture synchronization
+    volatile uint32_t last_image_capture_id;
+    pthread_mutex_t image_capture_mutex;
+    pthread_cond_t image_capture_cond;
 
 } SharedAppContext;
 

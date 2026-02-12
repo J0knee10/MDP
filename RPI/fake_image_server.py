@@ -1,21 +1,22 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
-import cgi
+import re
 
 class FakeImageServer(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/detect':
-            # --- Parse the multipart form data to get the object_id ---
-            form = cgi.FieldStorage(
-                fp=self.rfile,
-                headers=self.headers,
-                environ={'REQUEST_METHOD': 'POST',
-                         'CONTENT_TYPE': self.headers['Content-Type'],
-                         })
+            # --- Parse the multipart form data using modern techniques ---
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            # Decode using utf-8 and ignore errors from the binary image part
+            body_str = body.decode('utf-8', errors='ignore')
+            
+            # Use regex to find the object_id in the multipart content
+            match = re.search(r'name="object_id"\r\n\r\n(\S+)', body_str)
 
             obstacle_id = "Unknown"
-            if 'object_id' in form:
-                obstacle_id = form['object_id'].value
+            if match:
+                obstacle_id = match.group(1)
             print(f"[Fake Img Server] Received image for obstacle ID: {obstacle_id}")
 
             # --- Simulate a long processing time ---

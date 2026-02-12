@@ -24,11 +24,6 @@
 // --- Mappings from Python task1.py ---
 // These are static and internal to rpi_hal.c
 
-// Maps direction integer (0=N, 2=E, 4=S, 6=W) to string
-static const char* DIR_MAP_ANDROID_STR[] = {
-    "N", NULL, "E", NULL, "S", NULL, "W", NULL
-};
-
 // Maps class names to image IDs
 static const struct {
     const char* class_name;
@@ -67,12 +62,6 @@ static int write_to_serial(int fd, const char* message) {
     }
     return 0;
 }
-
-// Struct for libcurl to write response data into a buffer.
-struct MemoryStruct {
-    char *memory;
-    size_t size;
-};
 
 // Callback for libcurl to write data from a response.
 size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -267,12 +256,12 @@ int send_command_to_stm32(int fd, Command command, uint32_t external_cmd_id) {
         case CMD_TURN_LEFT:
             // STM32 format: :<cmdid>/MOTOR/TURNL/<param1Speed>/<param2DistAngle>;
             snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNL/%d/%d;",
-                     cmd_id_counter, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
+                     cmd_id_to_use, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_TURN_RIGHT:
             // STM32 format: :<cmdid>/MOTOR/TURNR/<param1Speed>/<param2DistAngle>;
             snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNR/%d/%d;",
-                     cmd_id_counter, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
+                     cmd_id_to_use, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             break;
         case CMD_SNAPSHOT:
             printf("[To STM32]: Skipping snapshot command (handled by RPi).\n");

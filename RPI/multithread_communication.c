@@ -4,6 +4,8 @@
 #include <pthread.h>
 #include <string.h>
 #include <curl/curl.h>
+#include <time.h> // For pthread_cond_timedwait
+#include <errno.h> // For ETIMEDOUT
 
 #include "shared_types.h"
 #include "rpi_hal.h"
@@ -18,13 +20,13 @@ const char* DIR_MAP_ANDROID_STR[8] = {
 #ifdef RPI_TESTING
 const char* STM32_DEVICE = "rpi_to_stm";
 const char* ANDROID_DEVICE = "android_to_rpi";
-const char* PATHFINDING_SERVER_URL = "http://127.0.0.1:4000/path";
-const char* IMAGE_SERVER_URL = "http://127.0.0.1:5000/detect";
+const char* PATHFINDING_SERVER_URL = "http://192.168.22.26:4000/path";
+const char* IMAGE_SERVER_URL = "http://192.168.22.26:5000/detect";
 #elif defined(FAKE_ANDROID_SIMULATION)
 const char* STM32_DEVICE = "/dev/ttyACM0";
 const char* ANDROID_DEVICE = "android_to_rpi";
-const char* PATHFINDING_SERVER_URL = "http://127.0.0.1:4000/path";
-const char* IMAGE_SERVER_URL = "http://127.0.0.1:5000/detect";
+const char* PATHFINDING_SERVER_URL = "http://192.168.22.26:4000/path";
+const char* IMAGE_SERVER_URL = "http://192.168.22.26:5000/detect";
 #else
 const char* STM32_DEVICE = "/dev/ttyACM0";
 const char* ANDROID_DEVICE = "/dev/rfcomm0";
@@ -102,7 +104,19 @@ void* process_image_thread(void* args) {
     printf("[ImgThread] Capturing image for obstacle %d...\n", task_args->obstacle_id);
     if (capture_image(CAPTURE_FILENAME) != 0) {
         fprintf(stderr, "[ImgThread] Failed to capture image.\n");
+        // Signal image capture failure by setting ID to 0 or another error code, or just don't signal
+        pthread_mutex_lock(&context->image_capture_mutex);
+        context->last_image_capture_id = 0; // Indicate failure or no successful capture
+        pthread_cond_signal(&context->image_capture_cond);
+        pthread_mutex_unlock(&context->image_capture_mutex);
     } else {
+        printf("[ImgThread] Image captured successfully for obstacle %d.\n", task_args->obstacle_id);
+        // Signal image capture success
+        pthread_mutex_lock(&context->image_capture_mutex);
+        context->last_image_capture_id = task_args->obstacle_id;
+        pthread_cond_signal(&context->image_capture_cond);
+        pthread_mutex_unlock(&context->image_capture_mutex);
+        
         // Send robot position to Android (Python's ROBOT,x,y,d)
         char robot_pos_msg[100];
         // Use +1 for x and y to match Python's 1-indexed coordinates for Android
@@ -175,6 +189,8 @@ void execute_navigation() {
     context->snap_position_idx = 0; // Reset snap position index for new navigation
     pthread_mutex_unlock(&context->lock);
 
+    uint32_t current_cmd_id = 1; // Start command IDs from 1 for the sequence
+
     for (int i = 0; i < context->command_count; i++) {
         pthread_mutex_lock(&context->lock);
         if (context->stop_requested) {
@@ -213,77 +229,155 @@ void execute_navigation() {
             pthread_create(&tid, NULL, process_image_thread, args);
             pthread_detach(tid); // Detach to allow thread to clean up its resources automatically
 
+            printf("[NavThread] Spawning image thread for obstacle %d. Waiting for image capture confirmation...\n", cmd.value);
+
+            struct timespec ts_img;
+            clock_gettime(CLOCK_REALTIME, &ts_img);
+            ts_img.tv_sec += 10; // Wait for up to 10 seconds for image capture confirmation
+
+            int img_ack_result = 0; // 0 for success, -1 for error/timeout
+            pthread_mutex_lock(&context->image_capture_mutex);
+            while (context->last_image_capture_id != (uint32_t)cmd.value && !context->stop_requested) {
+                int rc = pthread_cond_timedwait(&context->image_capture_cond, &context->image_capture_mutex, &ts_img);
+                if (rc == ETIMEDOUT) {
+                    fprintf(stderr, "[NavThread] Timeout waiting for image capture confirmation for obstacle %d.\n", cmd.value);
+                    img_ack_result = -1; // Indicate error
+                    break;
+                } else if (rc != 0) {
+                    fprintf(stderr, "[NavThread] Error waiting for image capture condition variable: %d\n", rc);
+                    img_ack_result = -1; // Indicate error
+                    break;
+                }
+            }
+
+            if (img_ack_result == 0 && context->last_image_capture_id == (uint32_t)cmd.value) {
+                printf("[NavThread] Received image capture confirmation for obstacle %d. Proceeding.\n", cmd.value);
+            } else if (img_ack_result == 0 && context->last_image_capture_id == 0) {
+                // This means an image capture failed (last_image_capture_id was set to 0)
+                fprintf(stderr, "[NavThread] Image capture for obstacle %d indicated failure. Aborting navigation.\n", cmd.value);
+                img_ack_result = -1; // Treat as failure for navigation flow
+            }
+            pthread_mutex_unlock(&context->image_capture_mutex);
+
+            if (img_ack_result == -1 || context->stop_requested) {
+                // If there was an error or stop was requested while waiting, break out of navigation
+                pthread_mutex_lock(&context->lock);
+                context->stop_requested = true; // Ensure stop state is propagated
+                context->state = STATE_IDLE;
+                pthread_mutex_unlock(&context->lock);
+                break; // Exit the command execution loop
+            }
+
+
         } else {
-                        send_command_to_stm32(context->stm32_fd, cmd, 0);
-                        sleep(1);
-                    }
+            // Send command to STM32 with a sequential ID
+            uint32_t sent_cmd_id = current_cmd_id++; // Store the ID we're sending
+            send_command_to_stm32(context->stm32_fd, cmd, sent_cmd_id);
+            printf("[NavThread] Sent command %u to STM32. Waiting for ACK...\n", sent_cmd_id);
+
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 10; // Wait for up to 5 seconds for ACK
+
+            int ack_result = 0; // 0 for success, -1 for error/timeout
+            pthread_mutex_lock(&context->stm32_ack_mutex);
+            while (context->stm32_last_ack_id != sent_cmd_id && !context->stop_requested) {
+                int rc = pthread_cond_timedwait(&context->stm32_ack_cond, &context->stm32_ack_mutex, &ts);
+                if (rc == ETIMEDOUT) {
+                    fprintf(stderr, "[NavThread] Timeout waiting for ACK for command %u.\n", sent_cmd_id);
+                    ack_result = -1; // Indicate error
+                    break;
+                } else if (rc != 0) {
+                    fprintf(stderr, "[NavThread] Error waiting for ACK condition variable: %d\n", rc);
+                    ack_result = -1; // Indicate error
+                    break;
+                }
+            }
+
+            if (ack_result == 0 && context->stm32_last_ack_id == sent_cmd_id) {
+                printf("[NavThread] Received ACK for command %u.\n", sent_cmd_id);
+            }
+            pthread_mutex_unlock(&context->stm32_ack_mutex);
+
+            if (ack_result == -1 || context->stop_requested) {
+                // If there was an error or stop was requested while waiting, break out of navigation
+                pthread_mutex_lock(&context->lock);
+                context->stop_requested = true; // Ensure stop state is propagated
+                context->state = STATE_IDLE;
+                pthread_mutex_unlock(&context->lock);
+                break; // Exit the command execution loop
+            }
+        }
                 }
                 // Using send_message_to_android_with_ack for navigation completion status
                 send_message_to_android_with_ack(context->android_fd, "\"Navigation complete.\"\n");
+}
+
+void* navigation_executor_thread(void* args) {
+    SharedAppContext* context = (SharedAppContext*)args;
+
+    while (1) {
+        pthread_mutex_lock(&context->lock);
+        while (!context->new_map_received && !context->stop_requested) {
+            printf("[NavThread] State: [IDLE]. Waiting for new mission...\n");
+            pthread_cond_wait(&context->new_task_cond, &context->lock);
+        }
+
+        if (context->stop_requested) {
+            context->state = STATE_IDLE;
+            context->stop_requested = false;
+        }
+
+        if (context->new_map_received) {
+            context->state = STATE_PATHFINDING;
+            context->new_map_received = false;
+        }
+        pthread_mutex_unlock(&context->lock);
+
+        if (context->state == STATE_PATHFINDING) {
+            printf("[NavThread] State: [PATHFINDING]. Requesting route from server...\n");
+            char payload[2048];
+            char obstacles_str[1500] = ""; // To build the obstacles array string
+
+            for (int i = 0; i < context->obstacle_count; i++) {
+                char obs_item[100]; // Buffer for a single obstacle JSON object
+                // Obstacle x, y are 0-indexed internally, server expects 0-indexed
+                // Direction 'd' is integer, server expects integer
+                snprintf(obs_item, sizeof(obs_item), "{\"id\":%d,\"x\":%d,\"y\":%d,\"d\":%d}",
+                         context->obstacles[i].id, context->obstacles[i].x, context->obstacles[i].y, context->obstacles[i].d);
+                strcat(obstacles_str, obs_item);
+                if (i < context->obstacle_count - 1) strcat(obstacles_str, ",");
             }
-            
-            void* navigation_executor_thread(void* args) {
-                SharedAppContext* context = (SharedAppContext*)args;
-            
-                while (1) {
-                    pthread_mutex_lock(&context->lock);
-                    while (!context->new_map_received && !context->stop_requested) {
-                        printf("[NavThread] State: [IDLE]. Waiting for new mission...\n");
-                        pthread_cond_wait(&context->new_task_cond, &context->lock);
-                    }
-            
-                    if (context->stop_requested) {
-                        context->state = STATE_IDLE;
-                        context->stop_requested = false;
-                    }
-            
-                    if (context->new_map_received) {
-                        context->state = STATE_PATHFINDING;
-                        context->new_map_received = false;
-                    }
-                    pthread_mutex_unlock(&context->lock);
-            
-                    if (context->state == STATE_PATHFINDING) {
-                        printf("[NavThread] State: [PATHFINDING]. Requesting route from server...\n");
-                        char payload[2048];
-                        char obstacles_str[1500] = ""; // To build the obstacles array string
-            
-                        for (int i = 0; i < context->obstacle_count; i++) {
-                            char obs_item[100]; // Buffer for a single obstacle JSON object
-                            // Obstacle x, y are 0-indexed internally, server expects 0-indexed
-                            // Direction 'd' is integer, server expects integer
-                            snprintf(obs_item, sizeof(obs_item), "{\"id\":%d,\"x\":%d,\"y\":%d,\"d\":%d}",
-                                     context->obstacles[i].id, context->obstacles[i].x, context->obstacles[i].y, context->obstacles[i].d);
-                            strcat(obstacles_str, obs_item);
-                            if (i < context->obstacle_count - 1) strcat(obstacles_str, ",");
-                        }
-            
-                        // Construct the full payload including robot initial state and retrying flag
-                        snprintf(payload, sizeof(payload), "{\"obstacles\":[%s],\"robot_x\":%d,\"robot_y\":%d,\"robot_dir\":%d,\"retrying\":false}",
-                                 obstacles_str, context->robot_start_x, context->robot_start_y, context->robot_start_dir);
-                        printf("[NavThread] Pathfinding payload: %s\n", payload);
-            
-                        char response[4096]; // Increased response buffer size
-                        if (post_data_to_server(PATHFINDING_SERVER_URL, payload, response, sizeof(response)) == 0) {
-                            // Call the modified parse_command_route_from_server
-                            if (parse_command_route_from_server(response, context->commands, &context->command_count,
-                                                                context->snap_positions, &context->snap_position_count) == 0) {
-                                send_message_to_android_with_ack(context->android_fd, "\"Route calculated. Navigating.\"\n"); // Using ack send
-                                execute_navigation();
-                            } else {
-                                send_message_to_android_with_ack(context->android_fd, "\"Error: Pathfinding failed to parse route.\"\n"); // Using ack send
-                            }
-                        } else {
-                            send_message_to_android_with_ack(context->android_fd, "\"Error: Pathfinding server communication failed.\"\n"); // Using ack send
-                        }
-                    }
-            
-                    pthread_mutex_lock(&context->lock);
-                    context->state = STATE_IDLE;
-                    pthread_mutex_unlock(&context->lock);
+
+            // Construct the full payload including robot initial state and retrying flag
+            snprintf(payload, sizeof(payload), "{\"obstacles\":[%s],\"robot_x\":%d,\"robot_y\":%d,\"robot_dir\":%d,\"retrying\":false}",
+                     obstacles_str, context->robot_start_x, context->robot_start_y, context->robot_start_dir);
+            printf("[NavThread] Pathfinding payload: %s\n", payload);
+
+            char response[4096]; // Increased response buffer size
+            if (post_data_to_server(PATHFINDING_SERVER_URL, payload, response, sizeof(response)) == 0) {
+                // --- DEBUG: Print raw server response ---
+                printf("[NavThread] Raw server response:\n---\n%s\n---\n", response);
+
+                // Call the modified parse_command_route_from_server
+                if (parse_command_route_from_server(response, context->commands, &context->command_count,
+                                                    context->snap_positions, &context->snap_position_count) == 0) {
+                    send_message_to_android_with_ack(context->android_fd, "\"Route calculated. Navigating.\"\n"); // Using ack send
+                    execute_navigation();
+                } else {
+                    send_message_to_android_with_ack(context->android_fd, "\"Error: Pathfinding failed to parse route.\"\n"); // Using ack send
                 }
-                return NULL;
+            } else {
+                send_message_to_android_with_ack(context->android_fd, "\"Error: Pathfinding server communication failed.\"\n"); // Using ack send
             }
+        }
+
+        pthread_mutex_lock(&context->lock);
+        context->state = STATE_IDLE;
+        pthread_mutex_unlock(&context->lock);
+    }
+    return NULL;
+}
             
             
             // =================================================================================
@@ -303,103 +397,107 @@ void execute_navigation() {
                         buffer[bytes_read] = '\0';
                         printf("[AndroidThread] Received: %s\n", buffer);
             
-                        // Handle direct STM commands (e.g., :1/MOTOR/FWD/70/10;)
-                        if (buffer[0] == ':') {
-                            uint32_t cmd_id;
-                            char cmd_type_str[10]; // e.g., "MOTOR"
-                            char cmd_action_str[10]; // e.g., "FWD", "TURNL", "TURNR", "BWD"
-                            int pwm_val; // For PWM value from Android (currently not used by send_command_to_stm32)
-                            int dist_angle_val; // Distance or angle
-            
-                            if (sscanf(buffer, ":%u/%[^/]/%[^/]/%d/%d;", &cmd_id, cmd_type_str, cmd_action_str, &pwm_val, &dist_angle_val) == 5) {
-                                if (strcmp(cmd_type_str, "MOTOR") == 0) {
-                                    Command direct_stm_cmd;
-                                    direct_stm_cmd.value = dist_angle_val;
-            
-                                    if (strcmp(cmd_action_str, "FWD") == 0) {
-                                        direct_stm_cmd.type = CMD_MOVE_FORWARD;
-                                    } else if (strcmp(cmd_action_str, "BWD") == 0) {
-                                        direct_stm_cmd.type = CMD_MOVE_BACKWARD;
-                                    } else if (strcmp(cmd_action_str, "TURNL") == 0) {
-                                        direct_stm_cmd.type = CMD_TURN_LEFT;
-                                    } else if (strcmp(cmd_action_str, "TURNR") == 0) {
-                                        direct_stm_cmd.type = CMD_TURN_RIGHT;
+                        // Check for JSON message first
+                        char category[50];
+                        if (get_json_string(buffer, "cat", category, sizeof(category)) == 0) {
+                            if (strcmp(category, "sendArena") == 0) {
+                                const char* value_ptr = strstr(buffer, "\"value\":");
+                                if (value_ptr) {
+                                    const char* map_json_start = strchr(value_ptr, '{');
+                                    if (map_json_start) {
+                                        pthread_mutex_lock(&context->lock);
+                                        if (context->state == STATE_IDLE) {
+                                            if (parse_android_map_and_obstacles(map_json_start, context) == 0) {
+                                                context->new_map_received = true;
+                                                send_message_to_android_with_ack(context->android_fd, "\"Map received. Pathfinding...\"\n");
+                                                pthread_cond_signal(&context->new_task_cond);
+                                            } else {
+                                                send_message_to_android_with_ack(context->android_fd, "\"Error: Invalid map format.\"\n");
+                                            }
+                                        } else {
+                                            send_message_to_android_with_ack(context->android_fd, "\"Error: Robot is busy. Cannot start new mission.\"\n");
+                                        }
+                                        pthread_mutex_unlock(&context->lock);
                                     } else {
-                                        fprintf(stderr, "[AndroidThread] Unknown MOTOR command action: %s\n", cmd_action_str);
-                                        char error_msg[100];
-                                        snprintf(error_msg, sizeof(error_msg), "\"Error: Unknown MOTOR command %s.\"\n", cmd_action_str);
-                                        send_message_to_android_with_ack(context->android_fd, error_msg);
-                                        continue;
+                                        fprintf(stderr, "[AndroidThread] Malformed 'sendArena': 'value' object not found.\n");
+                                        send_message_to_android_with_ack(context->android_fd, "\"Error: Malformed 'sendArena' message.\"\n");
                                     }
-            
-                                    printf("[AndroidThread] Direct STM command received. ID: %u, CMD: %s, PWM: %d, Value: %d\n",
-                                           cmd_id, cmd_action_str, pwm_val, dist_angle_val);
-            
-                                    // Send to STM32, using the parsed cmd_id
-                                    send_command_to_stm32(context->stm32_fd, direct_stm_cmd, cmd_id);
-            
-                                    char ack_msg[100];
-                                    snprintf(ack_msg, sizeof(ack_msg), "\"Direct STM command %u processed.\"\n", cmd_id);
-                                    send_message_to_android_with_ack(context->android_fd, ack_msg);
-            
                                 } else {
-                                    fprintf(stderr, "[AndroidThread] Unknown command type from Android: %s\n", cmd_type_str);
-                                    char error_msg[100];
-                                    snprintf(error_msg, sizeof(error_msg), "\"Error: Unknown command type %s.\"\n", cmd_type_str);
-                                    send_message_to_android_with_ack(context->android_fd, error_msg);
+                                    fprintf(stderr, "[AndroidThread] Malformed 'sendArena': 'value' key not found.\n");
+                                    send_message_to_android_with_ack(context->android_fd, "\"Error: Malformed 'sendArena' message.\"\n");
                                 }
+                            } else if (strcmp(category, "stop") == 0) { // STOP command as JSON
+                                pthread_mutex_lock(&context->lock);
+                                send_message_to_android_with_ack(context->android_fd, "\"STOP command received.\"\n");
+                                context->stop_requested = true;
+                                if(context->state != STATE_IDLE) {
+                                    pthread_cond_signal(&context->new_task_cond);
+                                }
+                                pthread_mutex_unlock(&context->lock);
                             } else {
-                                fprintf(stderr, "[AndroidThread] Malformed direct STM command from Android: %s\n", buffer);
-                                send_message_to_android_with_ack(context->android_fd, "\"Error: Malformed direct STM command.\"\n");
+                                fprintf(stderr, "[AndroidThread] Unrecognized JSON category from Android: %s\n", category);
                             }
                         }
-                        // Android JSON messages are expected to be enclosed in quotes and end with newline
-                        // e.g., "START{\"obstacles\":[...]}"\n
-                        else if (buffer[0] == '"' && bytes_read >= 2 && buffer[bytes_read-2] == '"') { // Check for quotes and newline
-                            // Remove outer quotes and newline for parsing
-                            char* json_start = buffer + 1;
-                            buffer[bytes_read-2] = '\0'; // Null-terminate before the last quote                
-                if (strncmp(json_start, "START", 5) == 0) {
-                    pthread_mutex_lock(&context->lock);
-                    if (context->state == STATE_IDLE) {
-                        // Pass the JSON part (after "START") to the new parser
-                        if (parse_android_map_and_obstacles(json_start + 5, context) == 0) {
-                            context->new_map_received = true;
-                            send_message_to_android_with_ack(context->android_fd, "\"Map received. Pathfinding...\"\n");
-                            pthread_cond_signal(&context->new_task_cond);
-                        } else {
-                            send_message_to_android_with_ack(context->android_fd, "\"Error: Invalid map format.\"\n");
+                        // All other messages are considered malformed or unrecognized by AndroidThread
+                        else {
+                            fprintf(stderr, "[AndroidThread] Malformed or unrecognized message from Android: %s\n", buffer);
                         }
+                    } else if (bytes_read == 0) {
+                        printf("[AndroidThread] Read 0 bytes, serial port might be closed or empty.\n");
+                        usleep(10000); // Small delay to prevent busy-waiting
                     } else {
-                         send_message_to_android_with_ack(context->android_fd, "\"Error: Robot is busy. Cannot start new mission.\"\n");
+                        perror("[AndroidThread] Error reading from serial port");
+                        usleep(100000); // 100ms
                     }
-                    pthread_mutex_unlock(&context->lock);
-
-                } else if (strncmp(json_start, "STOP", 4) == 0) {
-                    pthread_mutex_lock(&context->lock);
-                    send_message_to_android_with_ack(context->android_fd, "\"STOP command received.\"\n");
-                    context->stop_requested = true;
-                    if(context->state != STATE_IDLE) {
-                        pthread_cond_signal(&context->new_task_cond);
-                    }
-                    pthread_mutex_unlock(&context->lock);
-                } else {
-                    fprintf(stderr, "[AndroidThread] Unrecognized command from Android: %s\n", json_start);
                 }
-            } else {
-                fprintf(stderr, "[AndroidThread] Malformed message from Android (missing quotes or newline): %s\n", buffer);
+                return NULL;
             }
-        } else if (bytes_read == 0) {
-            printf("[AndroidThread] Read 0 bytes, serial port might be closed or empty.\n");
-        } else {
-            perror("[AndroidThread] Error reading from serial port");
-            // Add a small delay to prevent busy-waiting on error
-            usleep(100000); // 100ms
-        }
-    }
-    return NULL;
-}
-
+            
+            
+            // =================================================================================
+            // New THREAD: STM32 Listener
+            // =================================================================================
+            void* stm32_listener_thread(void* args) {
+                SharedAppContext* context = (SharedAppContext*)args;
+                char buffer[256]; // Buffer for incoming STM32 messages
+                ssize_t bytes_read;
+            
+                printf("[STM32Thread] Listening for messages...\n");
+            
+                while (1) {
+                    bytes_read = read(context->stm32_fd, buffer, sizeof(buffer) - 1);
+            
+                    if (bytes_read > 0) {
+                        buffer[bytes_read] = '\0';
+                        printf("[STM32Thread] Received: %s", buffer); // Use %s directly, as it might contain \n
+            
+                        // Check for ACK message format: !cmdId/DONE;
+                        uint32_t cmd_id;
+                        // Assuming the format is !<cmdId>/DONE;
+                        if (sscanf(buffer, "!%u/DONE;", &cmd_id) == 1) {
+                            pthread_mutex_lock(&context->stm32_ack_mutex);
+                            context->stm32_last_ack_id = cmd_id;
+                            pthread_cond_signal(&context->stm32_ack_cond);
+                            pthread_mutex_unlock(&context->stm32_ack_mutex);
+                            printf("[STM32Thread] Processed ACK for CMD ID: %u\n", cmd_id);
+                        } else {
+                            fprintf(stderr, "[STM32Thread] Unrecognized message format from STM32: %s\n", buffer);
+                        }
+                    } else if (bytes_read == 0) {
+                        // No data for a while, small delay to prevent busy-waiting
+                        usleep(10000); // 10ms
+                    } else {
+                        perror("[STM32Thread] Error reading from serial port");
+                        usleep(100000); // 100ms delay on error
+                    }
+                }
+                return NULL;
+            }
+            
+            
+            // =================================================================================
+            // Main Function (Initialization and Thread Management)
+            // =================================================================================
 
 // =================================================================================
 // Main Function (Initialization and Thread Management)
@@ -414,6 +512,17 @@ int main() {
     g_app_context.snap_position_count = 0; // Initialize new fields
     g_app_context.snap_position_idx = 0;   // Initialize new fields
 
+    // Initialize STM32 ACK synchronization mechanisms
+    g_app_context.stm32_last_ack_id = 0;
+    pthread_mutex_init(&g_app_context.stm32_ack_mutex, NULL);
+    pthread_cond_init(&g_app_context.stm32_ack_cond, NULL);
+
+    // Initialize Image capture synchronization mechanisms
+    g_app_context.last_image_capture_id = 0;
+    pthread_mutex_init(&g_app_context.image_capture_mutex, NULL);
+    pthread_cond_init(&g_app_context.image_capture_cond, NULL);
+
+
 
     g_app_context.stm32_fd = init_serial_port(STM32_DEVICE, BAUD_RATE);
     g_app_context.android_fd = init_serial_port(ANDROID_DEVICE, BAUD_RATE);
@@ -425,15 +534,21 @@ int main() {
 
     printf("--- RPi Control Centre Initialized ---\n");
 
-    pthread_t android_tid, nav_tid;
+    pthread_t android_tid, nav_tid, stm32_tid;
     pthread_create(&android_tid, NULL, android_listener_thread, &g_app_context);
     pthread_create(&nav_tid, NULL, navigation_executor_thread, &g_app_context);
+    pthread_create(&stm32_tid, NULL, stm32_listener_thread, &g_app_context); // Create the new STM32 listener thread
 
     pthread_join(android_tid, NULL);
     pthread_join(nav_tid, NULL);
+    pthread_join(stm32_tid, NULL); // Join the new STM32 listener thread
 
     pthread_mutex_destroy(&g_app_context.lock);
     pthread_cond_destroy(&g_app_context.new_task_cond);
+    pthread_mutex_destroy(&g_app_context.stm32_ack_mutex); // Destroy new mutex
+    pthread_cond_destroy(&g_app_context.stm32_ack_cond);   // Destroy new condition variable
+    pthread_mutex_destroy(&g_app_context.image_capture_mutex); // Destroy image capture mutex
+    pthread_cond_destroy(&g_app_context.image_capture_cond);   // Destroy image capture condition variable
     close(g_app_context.stm32_fd);
     close(g_app_context.android_fd);
 
@@ -459,7 +574,10 @@ but with the fake servers, follow these steps.
 Open your terminal in the `RPI` directory and compile with the `RPI_TESTING` flag defined:
 
     gcc -g -Wall -DRPI_TESTING multithread_communication.c json_parser.c rpi_hal.c -o test_center -lpthread -lcurl
+    gcc -g -Wall -DFAKE_ANDROID_SIMULATION multithread_communication.c json_parser.c rpi_hal.c -o STtest_center -lpthread -lcurl
     gcc -Wall multithread_communication.c json_parser.c rpi_hal.c -o ctrl_center -lpthread -lcurl
+    Make `fake_stm.py` executable:
+        chmod +x fake_stm.py
 
 *   `-DRPI_TESTING`: Activates the test configuration (e.g., using named pipes for STM/Android and localhost for servers).
 *   `-o test_center`: Specifies the output executable name.
@@ -490,11 +608,16 @@ Open two SEPARATE terminal windows/tabs, navigate to the `RPI` directory in each
     ```
     You should see: `Fake Image Recognition Server running on http://localhost:5000 ...`
 
+*   **Terminal 3 (Fake STM32 Simulation):**
+    ```bash
+    python3 fake_stm.py
+    ```
+
 **Step 4: Run the RPI Communication Program**
 
 Open a THIRD terminal window/tab, navigate to the `RPI` directory, and run the compiled program:
 
-    ./rpi_comm
+    ./test_center
 
 You should see initialization messages like: `--- RPi Control Centre Initialized ---` and `[AndroidThread] Listening for messages...` and `[NavThread] State: [IDLE]. Waiting for new mission...`
 
@@ -506,12 +629,12 @@ You will write a "START" command with obstacle data to the `android_to_rpi` name
 **Example START Command:**
 
 ```json
-"START{\"obstacles\":[{\"id\":1,\"x\":1,\"y\":2,\"d\":2},{\"id\":2,\"x\":2,\"y\":3,\"d\":0}],\"robot_x\":0,\"robot_y\":0,\"robot_dir\":0,\"retrying\":false}"
+"{"cat": "sendArena", "value": {"obstacles":[{"x": 9,"y": 9,"d": 0,"id": 0},{"x": 9,"y": 10,"d": 0,"id": 0},{"x": 2,"y": 12,"d": 1,"id": 1},{"x": 12,"y": 17,"d": 2,"id": 2},{"x": 11,"y": 4,"d": 4,"id": 3},{"x": 17,"y": 10,"d": 3,"id": 4}],"robot_x": 1,"robot_y": 1,"robot_direction": 1}}"
 ```
 
 **To send this command, paste the following into the FOURTH terminal and press Enter:**
 
-    echo "START{\"obstacles\":[{\"id\":1,\"x\":1,\"y\":2,\"d\":2},{\"id\":2,\"x\":2,\"y\":3,\"d\":0}],\"robot_x\":0,\"robot_y\":0,\"robot_dir\":0,\"retrying\":false}\"\\n" > android_to_rpi
+    echo "{\"cat\": \"sendArena\", \"value\": {\"obstacles\":[{\"id\":1,\"x\":1,\"y\":2,\"d\":2},{\"id\":2,\"x\":2,\"y\":3,\"d\":0}],\"robot_x\":0,\"robot_y\":0,\"robot_dir\":0,\"retrying\":false}}\\n" > android_to_rpi
 
 *   **Explanation of the Android message format:**
     *   It starts with `"START`

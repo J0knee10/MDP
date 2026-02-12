@@ -1,3 +1,5 @@
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 class FakePathServer(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/path':
@@ -11,10 +13,10 @@ class FakePathServer(BaseHTTPRequestHandler):
     "data": {
         "commands": [
             "FW10",
-            "TR90",
+            "FR90",
             "SP1",
             "FW15",
-            "TL90",
+            "FL90",
             "SP2",
             "FW20",
             "SP3",
@@ -46,6 +48,10 @@ class FakePathServer(BaseHTTPRequestHandler):
             self.end_headers()
 
 def run_path_server():
-    server_address = ('0.0.0.0', 5000) # Changed to port 5000
+    server_address = ('0.0.0.0', 4000) # Changed to port 4000
     httpd = HTTPServer(server_address, FakePathServer)
-    print('Fake Pathfinding Server running on http://localhost:5000 ...') # Changed port in print
+    print('Fake Pathfinding Server running on http://localhost:4000 ...') # Changed port in print
+    httpd.serve_forever()
+
+if __name__ == '__main__':
+    run_path_server()
