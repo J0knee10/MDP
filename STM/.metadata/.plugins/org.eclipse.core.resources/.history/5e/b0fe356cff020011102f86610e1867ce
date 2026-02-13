@@ -1,0 +1,19 @@
+#include "ir_sensor.h"
+
+void IR_Sensors_Init(void){
+  // Both pins are on Port C
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  GPIO_InitTypeDef g = {0};
+  g.Mode  = GPIO_MODE_INPUT;
+  g.Pull  = GPIO_PULLUP;          // Set to PULLUP to ensure a stable HIGH state when no sensor is connected
+  g.Speed = GPIO_SPEED_FREQ_LOW;
+
+  // LEFT -> PC6
+  g.Pin = IR_LEFT_Pin;
+  HAL_GPIO_Init(IR_LEFT_GPIO_Port, &g);
+
+  // RIGHT -> PC9
+  g.Pin = IR_RIGHT_Pin;
+  HAL_GPIO_Init(IR_RIGHT_GPIO_Port, &g);
+}

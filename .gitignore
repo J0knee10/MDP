@@ -20,7 +20,6 @@
 
 # IDE / editor
 .vscode/
-.metadata/
 
 # Python
 .venv/

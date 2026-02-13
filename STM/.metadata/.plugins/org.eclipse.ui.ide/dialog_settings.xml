@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section name="Workbench">
+	<section name="ExternalProjectImportWizard">
+		<item key="WizardProjectsImportPage.STORE_NESTED_PROJECTS" value="true"/>
+		<item key="WizardProjectsImportPage.STORE_COPY_PROJECT_ID" value="true"/>
+		<item key="WizardProjectsImportPage.STORE_ARCHIVE_SELECTED" value="false"/>
+		<item key="WizardProjectsImportPage.STORE_CLOSE_CREATED_PROJECTS_ID" value="false"/>
+		<item key="WizardProjectsImportPage.STORE_HIDE_CONFLICTING_PROJECTS_ID" value="false"/>
+		<list key="WizardProjectsImportPage.STORE_DIRECTORIES">
+			<item value="C:\Jon\Uni stuff\CE\MDP-25s1-G29\stm32-motor\stm32-motor"/>
+			<item value="C:\Jon\Uni stuff\CE\MDP\STM\MDP_test"/>
+			<item value="C:\Jon\Uni stuff\CE\MDP\STM\stm32-motor"/>
+			<item value="C:\Jon\Uni stuff\CE\Embedded-Systems\SC2104\Labs\Lab5"/>
+		</list>
+		<list key="WizardProjectsImportPage.STORE_ARCHIVES">
+			<item value=""/>
+		</list>
+		<section name="ExternalProjectImportWizard.dialogBounds">
+			<item key="DIALOG_X_ORIGIN" value="420"/>
+			<item key="DIALOG_Y_ORIGIN" value="102"/>
+			<item key="DIALOG_WIDTH" value="613"/>
+			<item key="DIALOG_HEIGHT" value="694"/>
+			<item key="DIALOG_FONT_NAME" value="1|Segoe UI|9.0|0|WINDOWS|1|-24|0|0|0|400|0|0|0|1|0|0|0|0|Segoe UI"/>
+		</section>
+	</section>
+	<section name="SmartImportWizard">
+		<item key="SmartImportRootWizardPage.STORE_HIDE_ALREADY_OPEN" value="false"/>
+		<item key="SmartImportRootWizardPage.STORE_CLOSE_IMPORTED" value="false"/>
+		<item key="SmartImportRootWizardPage.STORE_NESTED_PROJECTS" value="true"/>
+		<item key="SmartImportRootWizardPage.STORE_CONFIGURE_NATURES" value="true"/>
+		<list key="org.eclipse.ui.internal.wizards.datatransfer.SmartImportRootWizardPage.knownSources">
+			<item value="C:\Jon\Uni stuff\CE\MDP\STM\stm32-motor"/>
+			<item value="C:\Jon\Uni stuff\CE\MDP\STM\STM32F407"/>
+		</list>
+		<section name="SmartImportWizard.dialogBounds">
+			<item key="DIALOG_X_ORIGIN" value="420"/>
+			<item key="DIALOG_Y_ORIGIN" value="102"/>
+			<item key="DIALOG_WIDTH" value="883"/>
+			<item key="DIALOG_HEIGHT" value="606"/>
+			<item key="DIALOG_FONT_NAME" value="1|Segoe UI|9.0|0|WINDOWS|1|-24|0|0|0|400|0|0|0|1|0|0|0|0|Segoe UI"/>
+		</section>
+	</section>
+	<section name="ChooseWorkspaceDialogSettings">
+		<item key="DIALOG_X_ORIGIN" value="417"/>
+		<item key="DIALOG_Y_ORIGIN" value="232"/>
+	</section>
+	<section name="CleanDialogSettings">
+		<item key="BUILD_NOW" value="true"/>
+		<item key="BUILD_ALL" value="false"/>
+		<item key="TOGGLE_SELECTED" value="true"/>
+		<item key="DIALOG_WIDTH" value="576"/>
+		<item key="DIALOG_HEIGHT" value="460"/>
+		<item key="DIALOG_FONT_NAME" value="1|Segoe UI|9.0|0|WINDOWS|1|-24|0|0|0|400|0|0|0|1|0|0|0|0|Segoe UI"/>
+	</section>
+</section>
