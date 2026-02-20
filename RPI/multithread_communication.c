@@ -25,13 +25,13 @@ const char* IMAGE_SERVER_URL = "http://192.168.22.26:5000/detect";
 #elif defined(FAKE_ANDROID_SIMULATION)
 const char* STM32_DEVICE = "/dev/ttyACM0";
 const char* ANDROID_DEVICE = "android_to_rpi";
-const char* PATHFINDING_SERVER_URL = "http://192.168.22.26:4000/path";
-const char* IMAGE_SERVER_URL = "http://192.168.22.26:5000/detect";
+const char* PATHFINDING_SERVER_URL = "http://192.168.22.24:5000/path";
+const char* IMAGE_SERVER_URL = "http://192.168.22.21:5000/detect";
 #else
 const char* STM32_DEVICE = "/dev/ttyACM0";
 const char* ANDROID_DEVICE = "/dev/rfcomm0";
-const char* PATHFINDING_SERVER_URL = "http://192.168.22.26:4000/path";
-const char* IMAGE_SERVER_URL = "http://192.168.22.26:5000/detect";
+const char* PATHFINDING_SERVER_URL = "http://192.168.22.24:5000/path";
+const char* IMAGE_SERVER_URL = "http://192.168.22.21:5000/detect";
 #endif
 
 const int BAUD_RATE = 115200;
@@ -116,7 +116,7 @@ void* process_image_thread(void* args) {
         context->last_image_capture_id = task_args->obstacle_id;
         pthread_cond_signal(&context->image_capture_cond);
         pthread_mutex_unlock(&context->image_capture_mutex);
-        
+
         // Send robot position to Android (Python's ROBOT,x,y,d)
         char robot_pos_msg[100];
         // Use +1 for x and y to match Python's 1-indexed coordinates for Android
@@ -132,41 +132,58 @@ void* process_image_thread(void* args) {
         if (post_image_to_server_thread(task_args->obstacle_id, image_server_response, sizeof(image_server_response)) == 0) {
             printf("[ImgThread] Image server response: %s\n", image_server_response);
 
-            // Parse response to get detected object and send to Android
-            int detected = 0;
-            // The JSON parsing for "detected" and "objects" array needs to be more robust.
-            // For now, using basic string searches as per json_parser.c implementation strategy.
-            if (get_json_int(image_server_response, "detected", &detected) == 0 && detected == 1) {
-                // Find the "objects" array and then the first object
+            /* Compatible with object_detection_server.py: server returns success, detected, count, objects[] with class_label, img_id, confidence, bbox.
+             * Use "count" for detection (integer); prefer "img_id" from JSON; do not skip Bullseye — use first object with valid img_id. */
+            int count = 0;
+            if (get_json_int(image_server_response, "count", &count) != 0 || count <= 0) {
+                printf("[ImgThread] No object detected by image server for obstacle %d.\n", task_args->obstacle_id);
+            } else {
                 const char* objects_array_start = strstr(image_server_response, "\"objects\":[");
                 if (objects_array_start) {
                     objects_array_start += strlen("\"objects\":[");
-                    const char* first_obj_start = strchr(objects_array_start, '{');
-                    if (first_obj_start) {
-                        const char* first_obj_end = strchr(first_obj_start, '}');
-                        if (first_obj_end) {
-                            char single_obj_json[512]; // Temporary buffer for one object's JSON
-                            strncpy(single_obj_json, first_obj_start, first_obj_end - first_obj_start + 1);
-                            single_obj_json[first_obj_end - first_obj_start + 1] = '\0';
+                    const char* ptr = objects_array_start;
+                    int sent = 0;
+                    while (*ptr && sent == 0) {
+                        const char* obj_start = strchr(ptr, '{');
+                        if (!obj_start) break;
+                        int depth = 1;
+                        const char* p = obj_start + 1;
+                        while (*p && depth > 0) {
+                            if (*p == '{') depth++;
+                            else if (*p == '}') depth--;
+                            p++;
+                        }
+                        if (depth != 0) break;
+                        const char* obj_end = p - 1;
+                        size_t obj_len = (size_t)(obj_end - obj_start + 1);
+                        char single_obj_json[512];
+                        if (obj_len >= sizeof(single_obj_json)) obj_len = sizeof(single_obj_json) - 1;
+                        strncpy(single_obj_json, obj_start, obj_len);
+                        single_obj_json[obj_len] = '\0';
 
-                            // Extract class_label from the object JSON
-                            if (get_json_string(single_obj_json, "class_label", class_label, sizeof(class_label)) == 0 ||
-                                get_json_string(single_obj_json, "class", class_label, sizeof(class_label)) == 0) { // Try 'class' if 'class_label' not found
-                                int img_id = get_img_id_from_class_name(class_label);
-                                if (img_id != -1) {
-                                    send_target_result_to_android(context->android_fd, task_args->obstacle_id, img_id);
-                                    printf("[ImgThread] Sent image detection result to Android: obstacle_id=%d, class_label=%s, img_id=%d\n", task_args->obstacle_id, class_label, img_id);
-                                } else {
-                                    fprintf(stderr, "[ImgThread] Unknown class label received: %s\n", class_label);
-                                }
+                        if (get_json_string(single_obj_json, "class_label", class_label, sizeof(class_label)) != 0)
+                            get_json_string(single_obj_json, "class", class_label, sizeof(class_label));
+                        if (class_label[0] != '\0') {
+                            /* Strip " - ..." suffix if present (server may send "Number 4 - 4") */
+                            char* dash = strstr(class_label, " - ");
+                            if (dash) *dash = '\0';
+                            int img_id = -1;
+                            if (get_json_int(single_obj_json, "img_id", &img_id) != 0 || img_id < 0)
+                                img_id = get_img_id_from_class_name(class_label);
+                            if (img_id >= 0) {
+                                /* Send TARGET,object_id,img_id to Android (e.g. "TARGET,1,11") */
+                                send_target_result_to_android(context->android_fd, task_args->obstacle_id, img_id);
+                                printf("[ImgThread] Sent image detection result to Android: obstacle_id=%d, class_label=%s, img_id=%d\n", task_args->obstacle_id, class_label, img_id);
+                                sent = 1;
                             } else {
-                                fprintf(stderr, "[ImgThread] Could not extract class label from image server response.\n");
+                                fprintf(stderr, "[ImgThread] Unknown class label received or invalid img_id: %s\n", class_label);
                             }
                         }
+                        ptr = p;
                     }
+                    if (sent == 0)
+                        fprintf(stderr, "[ImgThread] No valid object with img_id for obstacle %d.\n", task_args->obstacle_id);
                 }
-            } else {
-                printf("[ImgThread] No object detected by image server for obstacle %d.\n", task_args->obstacle_id);
             }
         } else {
             fprintf(stderr, "[ImgThread] Failed to upload image or no ACK received from image server.\n");
@@ -308,9 +325,9 @@ void execute_navigation() {
                 break; // Exit the command execution loop
             }
         }
-                }
-                // Using send_message_to_android_with_ack for navigation completion status
-                send_message_to_android_with_ack(context->android_fd, "\"Navigation complete.\"\n");
+    } // End of for loop
+    // Using send_message_to_android_with_ack for navigation completion status
+    send_message_to_android_with_ack(context->android_fd, "\"Navigation complete.\"\n");
 }
 
 void* navigation_executor_thread(void* args) {
@@ -386,7 +403,7 @@ void* navigation_executor_thread(void* args) {
             
             void* android_listener_thread(void* args) {
                 SharedAppContext* context = (SharedAppContext*)args;
-                char buffer[2048]; // Buffer for incoming Android messages
+                char buffer[8192]; // Buffer for incoming Android messages
             
                 while (1) {
                     printf("[AndroidThread] Listening for messages...\n");
@@ -409,31 +426,41 @@ void* navigation_executor_thread(void* args) {
                                         if (context->state == STATE_IDLE) {
                                             if (parse_android_map_and_obstacles(map_json_start, context) == 0) {
                                                 context->new_map_received = true;
-                                                send_message_to_android_with_ack(context->android_fd, "\"Map received. Pathfinding...\"\n");
+                                                send_android_ack(context->android_fd, category, "Map received. Pathfinding...");
                                                 pthread_cond_signal(&context->new_task_cond);
                                             } else {
-                                                send_message_to_android_with_ack(context->android_fd, "\"Error: Invalid map format.\"\n");
+                                                send_android_ack(context->android_fd, category, "Error: Invalid map format.");
                                             }
                                         } else {
-                                            send_message_to_android_with_ack(context->android_fd, "\"Error: Robot is busy. Cannot start new mission.\"\n");
+                                            send_android_ack(context->android_fd, category, "Error: Robot is busy. Cannot start new mission.");
                                         }
                                         pthread_mutex_unlock(&context->lock);
                                     } else {
                                         fprintf(stderr, "[AndroidThread] Malformed 'sendArena': 'value' object not found.\n");
-                                        send_message_to_android_with_ack(context->android_fd, "\"Error: Malformed 'sendArena' message.\"\n");
+                                        send_android_ack(context->android_fd, category, "Error: Malformed 'sendArena' message.");
                                     }
                                 } else {
                                     fprintf(stderr, "[AndroidThread] Malformed 'sendArena': 'value' key not found.\n");
-                                    send_message_to_android_with_ack(context->android_fd, "\"Error: Malformed 'sendArena' message.\"\n");
+                                    send_android_ack(context->android_fd, category, "Error: Malformed 'sendArena' message.");
                                 }
                             } else if (strcmp(category, "stop") == 0) { // STOP command as JSON
                                 pthread_mutex_lock(&context->lock);
-                                send_message_to_android_with_ack(context->android_fd, "\"STOP command received.\"\n");
+                                send_android_ack(context->android_fd, category, "STOP command received.");
                                 context->stop_requested = true;
                                 if(context->state != STATE_IDLE) {
                                     pthread_cond_signal(&context->new_task_cond);
                                 }
                                 pthread_mutex_unlock(&context->lock);
+                            } else if (strcmp(category, "stm") == 0) { // Direct STM command from Android
+                                char stm_command_str[100]; // Buffer for the command string like "<FR090>"
+                                if (get_json_string(buffer, "value", stm_command_str, sizeof(stm_command_str)) == 0) {
+                                    // Parse and execute the STM command. This function will be in rpi_hal.c
+                                    // It will also handle waiting for ACK from STM32
+                                    parse_and_execute_android_command(context->stm32_fd, stm_command_str, context);
+                                } else {
+                                    fprintf(stderr, "[AndroidThread] Malformed 'stm' command: 'value' key not found.\n");
+                                    send_android_ack(context->android_fd, category, "Error: Malformed STM command.");
+                                }
                             } else {
                                 fprintf(stderr, "[AndroidThread] Unrecognized JSON category from Android: %s\n", category);
                             }
