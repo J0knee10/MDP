@@ -32,14 +32,17 @@ class FakeImageServer(BaseHTTPRequestHandler):
             except ValueError:
                 img_id = -1
 
-            # Return a MINIMAL detection response to be compatible with the simple C parser.
-            # Only includes fields the C code is known to use.
+            # Return the FULL detection response, as requested for testing the C parser.
+            # Note: The C parser is expected to fail on this, but this is for validation.
             response_data = {
+                "success": True,
                 "count": 1,
                 "objects": [
                     {
                         "class_label": f"test_object_{obstacle_id_str}",
-                        "img_id": img_id
+                        "img_id": img_id,
+                        "confidence": 0.95,
+                        "bbox": [10, 20, 30, 40]
                     }
                 ]
             }
@@ -55,10 +58,10 @@ class FakeImageServer(BaseHTTPRequestHandler):
 
 
 def run_image_server():
-    # Corrected port to 5000
-    server_address = ('0.0.0.0', 5000)
+    # Set to run on port 4000 as per user request.
+    server_address = ('0.0.0.0', 4000)
     httpd = HTTPServer(server_address, FakeImageServer)
-    print('Fake Image Recognition Server running on http://localhost:5000 ...')
+    print('Fake Image Recognition Server running on http://localhost:4000 ...')
     httpd.serve_forever()
 
 if __name__ == '__main__':
