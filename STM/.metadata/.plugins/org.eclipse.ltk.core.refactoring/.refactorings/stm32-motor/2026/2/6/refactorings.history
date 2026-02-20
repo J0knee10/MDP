@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Rename resource &apos;stm32-motor/MDP_test.ioc&apos; to &apos;stm32-motor.ioc&apos;" description="Rename resource &apos;MDP_test.ioc&apos;" flags="7" id="org.eclipse.ltk.core.refactoring.rename.resource" input="MDP_test.ioc" name="stm32-motor.ioc" stamp="1770233047031" updateReferences="true"/>
+</session>

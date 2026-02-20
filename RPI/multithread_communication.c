@@ -18,10 +18,11 @@ const char* DIR_MAP_ANDROID_STR[8] = {
 
 // --- Configuration ---
 #ifdef RPI_TESTING
-const char* STM32_DEVICE = "rpi_to_stm";
-const char* ANDROID_DEVICE = "android_to_rpi";
-const char* PATHFINDING_SERVER_URL = "http://192.168.22.26:4000/path";
-const char* IMAGE_SERVER_URL = "http://192.168.22.26:5000/detect";
+const char* STM32_DEVICE_WRITE = "rpi_to_stm";
+const char* STM32_DEVICE_READ = "stm_to_rpi";
+const char* ANDROID_DEVICE = "/dev/rfcomm0";
+const char* PATHFINDING_SERVER_URL = "http://192.168.22.26:5000/path";
+const char* IMAGE_SERVER_URL = "http://192.168.22.26:4000/detect";
 #elif defined(FAKE_ANDROID_SIMULATION)
 const char* STM32_DEVICE = "/dev/ttyACM0";
 const char* ANDROID_DEVICE = "android_to_rpi";
@@ -39,6 +40,12 @@ const char* CAPTURE_FILENAME = "capture.jpg";
 
 // --- Global Shared Application Context ---
 SharedAppContext g_app_context;
+
+#ifdef RPI_TESTING
+// In test mode, we need a separate file descriptor for reading ACKs
+// to avoid the process reading its own commands from the write pipe.
+int g_stm32_ack_fd = -1;
+#endif
 
 
 // =================================================================================
@@ -492,7 +499,13 @@ void* navigation_executor_thread(void* args) {
                 printf("[STM32Thread] Listening for messages...\n");
             
                 while (1) {
-                    bytes_read = read(context->stm32_fd, buffer, sizeof(buffer) - 1);
+                    #ifdef RPI_TESTING
+                        // In test mode, read from the dedicated ACK pipe.
+                        bytes_read = read(g_stm32_ack_fd, buffer, sizeof(buffer) - 1);
+                    #else
+                        // In normal mode, read from the bidirectional serial port.
+                        bytes_read = read(context->stm32_fd, buffer, sizeof(buffer) - 1);
+                    #endif
             
                     if (bytes_read > 0) {
                         buffer[bytes_read] = '\0';
@@ -550,14 +563,26 @@ int main() {
     pthread_cond_init(&g_app_context.image_capture_cond, NULL);
 
 
-
-    g_app_context.stm32_fd = init_serial_port(STM32_DEVICE, BAUD_RATE);
+    // Initialize serial ports / test pipes
     g_app_context.android_fd = init_serial_port(ANDROID_DEVICE, BAUD_RATE);
 
-    if (g_app_context.stm32_fd == -1 || g_app_context.android_fd == -1) {
-        fprintf(stderr, "Fatal: Failed to initialize serial ports. Exiting.\n");
-        return 1;
-    }
+    #ifdef RPI_TESTING
+        printf("--- RPI_TESTING mode enabled ---\n");
+        // In test mode, use separate pipes for writing commands and reading ACKs.
+        g_app_context.stm32_fd = init_serial_port(STM32_DEVICE_WRITE, BAUD_RATE);
+        g_stm32_ack_fd = init_serial_port(STM32_DEVICE_READ, BAUD_RATE);
+        if (g_app_context.stm32_fd == -1 || g_stm32_ack_fd == -1 || g_app_context.android_fd == -1) {
+            fprintf(stderr, "Fatal: Failed to initialize serial ports/pipes. Exiting.\n");
+            return 1;
+        }
+    #else
+        g_app_context.stm32_fd = init_serial_port(STM32_DEVICE, BAUD_RATE);
+        if (g_app_context.stm32_fd == -1 || g_app_context.android_fd == -1) {
+            fprintf(stderr, "Fatal: Failed to initialize serial ports. Exiting.\n");
+            return 1;
+        }
+    #endif
+
 
     printf("--- RPi Control Centre Initialized ---\n");
 
@@ -576,8 +601,14 @@ int main() {
     pthread_cond_destroy(&g_app_context.stm32_ack_cond);   // Destroy new condition variable
     pthread_mutex_destroy(&g_app_context.image_capture_mutex); // Destroy image capture mutex
     pthread_cond_destroy(&g_app_context.image_capture_cond);   // Destroy image capture condition variable
-    close(g_app_context.stm32_fd);
-    close(g_app_context.android_fd);
+    
+    // Close file descriptors
+    #ifdef RPI_TESTING
+        if (g_stm32_ack_fd != -1) close(g_stm32_ack_fd);
+    #endif
+    if (g_app_context.stm32_fd != -1) close(g_app_context.stm32_fd);
+    if (g_app_context.android_fd != -1) close(g_app_context.android_fd);
+
 
     curl_global_cleanup(); // Clean up curl once at application shutdown
     return 0;

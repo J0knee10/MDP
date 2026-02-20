@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section name="Workbench">
+	<item key="hasShownOverlayPopupBefore" value="true"/>
+	<item key="replaceBarOpen" value="false"/>
+	<list key="searchhistory">
+		<item value="const float Kp_heading"/>
+		<item value="Kp_"/>
+		<item value="kp"/>
+		<item value="Kp"/>
+		<item value="actual:"/>
+		<item value="actual"/>
+		<item value="currentAngle"/>
+		<item value="readIMU"/>
+		<item value="FWD_COMPLETE"/>
+		<item value="encoder"/>
+		<item value="task2loop"/>
+		<item value="DELAY"/>
+		<item value="AIN1_"/>
+		<item value="AIN"/>
+	</list>
+</section>

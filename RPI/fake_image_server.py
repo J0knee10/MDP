@@ -1,23 +1,21 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import re
+import json
 
 class FakeImageServer(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/detect':
-            # --- Parse the multipart form data using modern techniques ---
             content_length = int(self.headers['Content-Length'])
             body = self.rfile.read(content_length)
-            # Decode using utf-8 and ignore errors from the binary image part
             body_str = body.decode('utf-8', errors='ignore')
             
-            # Use regex to find the object_id in the multipart content
             match = re.search(r'name="object_id"\r\n\r\n(\S+)', body_str)
 
-            obstacle_id = "Unknown"
+            obstacle_id_str = "0"
             if match:
-                obstacle_id = match.group(1)
-            print(f"[Fake Img Server] Received image for obstacle ID: {obstacle_id}")
+                obstacle_id_str = match.group(1)
+            print(f"[Fake Img Server] Received image for obstacle ID: {obstacle_id_str}")
 
             # --- Simulate a long processing time ---
             print("[Fake Img Server] Simulating 5-second image recognition...")
@@ -28,28 +26,36 @@ class FakeImageServer(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            # Return a simulated detection response
-            response = f'''
-{{
-    "detected": 1,
-    "objects": [
-        {{
-            "class_label": "test_object_{obstacle_id}",
-            "confidence": 0.95,
-            "box": [10, 20, 30, 40]
-        }}
-    ]
-}}
-            '''
+            try:
+                obstacle_id = int(obstacle_id_str)
+                img_id = obstacle_id + 10 # Create a unique img_id based on obstacle_id
+            except ValueError:
+                img_id = -1
+
+            # Return a MINIMAL detection response to be compatible with the simple C parser.
+            # Only includes fields the C code is known to use.
+            response_data = {
+                "count": 1,
+                "objects": [
+                    {
+                        "class_label": f"test_object_{obstacle_id_str}",
+                        "img_id": img_id
+                    }
+                ]
+            }
             
-            self.wfile.write(response.encode('utf-8'))
-            print(f"[Fake Img Server] Sent response: {response}")
+            # Create a compact JSON string without indentation.
+            response_json = json.dumps(response_data)
+            
+            self.wfile.write(response_json.encode('utf-8'))
+            print(f"[Fake Img Server] Sent response: {response_json}")
         else:
             self.send_response(404)
             self.end_headers()
 
 
 def run_image_server():
+    # Corrected port to 5000
     server_address = ('0.0.0.0', 5000)
     httpd = HTTPServer(server_address, FakeImageServer)
     print('Fake Image Recognition Server running on http://localhost:5000 ...')

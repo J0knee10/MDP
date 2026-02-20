@@ -1,0 +1,4733 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2025 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "cmsis_os.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "oled.h"
+#include "math.h"
+#include <stdlib.h>
+#include <stdio.h>
+#include "queue.h"
+#include "ir_sensor.h"   // our PC6/PC9 sensor helpers
+#include <string.h>        // your SSD1306 driver
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+typedef struct {
+    float Kp;
+    float Ki;
+    float Kd;
+
+    float integral;
+    float prev_error;
+
+    int target_speed;  // encoder value
+    int measured_speed;
+    int pwm_output;
+} PID_Controller;
+
+enum cmdList {FWD,REV,STOP,TURNL,TURNR, TURN90L, TURN90R, TASK2, PWMTURNL, PWMTURNR};
+
+typedef struct {
+	enum cmdList command;
+	uint32_t param1Speed;
+	uint32_t param2DistAngle;
+	uint32_t cmdId;
+} MotorCommand_t;
+
+typedef struct {
+	enum cmdList command;
+	uint32_t param1Speed;
+	float param2DistAngle;
+	uint32_t cmdId;
+} MotorCommandF_t;
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define ICM20948_I2C_ADDR   (0x68 << 1)
+#define AK09916_I2C_ADDR    (0x0C << 1) // AK09916's I2C address is 0x0C
+#define AK09916_ST1_REG     0x10        // Status 1 Register
+#define AK09916_HXL_REG     0x11        // X-axis magnetic data, lower byte
+#define AK09916_ST2_REG     0x18        // Status 2 Register
+#define AK09916_CNTL2_REG   0x31        // Control 2 Register
+
+#define SERVO_CENTER 152
+#define SERVO_CENTER_A 145
+#define SERVO_CENTER_A_PERCENTAGE 30
+#define SERVO_CENTER_B 154
+#define SERVO_LEFT_MAX 100
+#define SERVO_RIGHT_MAX 210
+#define SERVO_LEFT1 110
+#define SERVO_RIGHT1 200
+#define SERVO_RANGE (SERVO_RIGHT_MAX - SERVO_LEFT_MAX)
+
+// Some notes for fun
+#define NOTE_B0  31
+#define NOTE_C1  33
+#define NOTE_CS1 35
+#define NOTE_D1  37
+#define NOTE_DS1 39
+#define NOTE_E1  41
+#define NOTE_F1  44
+#define NOTE_FS1 46
+#define NOTE_G1  49
+#define NOTE_GS1 52
+#define NOTE_A1  55
+#define NOTE_AS1 58
+#define NOTE_B1  62
+#define NOTE_C2  65
+#define NOTE_CS2 69
+#define NOTE_D2  73
+#define NOTE_DS2 78
+#define NOTE_E2  82
+#define NOTE_F2  87
+#define NOTE_FS2 93
+#define NOTE_G2  98
+#define NOTE_GS2 104
+#define NOTE_A2  110
+#define NOTE_AS2 117
+#define NOTE_B2  123
+#define NOTE_C3  131
+#define NOTE_CS3 139
+#define NOTE_D3  147
+#define NOTE_DS3 156
+#define NOTE_E3  165
+#define NOTE_F3  175
+#define NOTE_FS3 185
+#define NOTE_G3  196
+#define NOTE_GS3 208
+#define NOTE_A3  220
+#define NOTE_AS3 233
+#define NOTE_B3  247
+#define NOTE_C4  262
+#define NOTE_CS4 277
+#define NOTE_D4  294
+#define NOTE_DS4 311
+#define NOTE_E4  330
+#define NOTE_F4  349
+#define NOTE_FS4 370
+#define NOTE_G4  392
+#define NOTE_GS4 415
+#define NOTE_A4  440
+#define NOTE_AS4 466
+#define NOTE_B4  494
+#define NOTE_C5  523
+#define NOTE_CS5 554
+#define NOTE_D5  587
+#define NOTE_DS5 622
+#define NOTE_E5  659
+#define NOTE_F5  698
+#define NOTE_FS5 740
+#define NOTE_G5  784
+#define NOTE_GS5 831
+#define NOTE_A5  880
+#define NOTE_AS5 932
+#define NOTE_B5  988
+#define NOTE_C6  1047
+#define NOTE_CS6 1109
+#define NOTE_D6  1175
+#define NOTE_DS6 1245
+#define NOTE_E6  1319
+#define NOTE_F6  1397
+#define NOTE_FS6 1480
+#define NOTE_G6  1568
+#define NOTE_GS6 1661
+#define NOTE_A6  1760
+#define NOTE_AS6 1865
+#define NOTE_B6  1976
+#define NOTE_C7  2093
+#define NOTE_CS7 2217
+#define NOTE_D7  2349
+#define NOTE_DS7 2489
+#define NOTE_E7  2637
+#define NOTE_F7  2794
+#define NOTE_FS7 2960
+#define NOTE_G7  3136
+#define NOTE_GS7 3322
+#define NOTE_A7  3520
+#define NOTE_AS7 3729
+#define NOTE_B7  3951
+#define NOTE_C8  4186
+#define NOTE_CS8 4435
+#define NOTE_D8  4699
+#define NOTE_DS8 4978
+
+int melody[] = {
+  NOTE_E5, NOTE_E5, 0, NOTE_E5, 0, NOTE_C5, NOTE_E5, 0,
+  NOTE_G5, 0, 0, 0, NOTE_G4, 0, 0, 0,
+
+  NOTE_C5, 0, 0, NOTE_G4, 0, 0, NOTE_E4, 0,
+  0, NOTE_A4, 0, NOTE_B4, 0, NOTE_AS4, NOTE_A4, 0,
+  NOTE_G4, NOTE_E5, NOTE_G5, NOTE_A5, 0, NOTE_F5, NOTE_G5, 0,
+  NOTE_E5, 0, NOTE_C5, 0, NOTE_D5, NOTE_B4, 0, 0,
+
+  NOTE_C5, 0, 0, NOTE_G4, 0, 0, NOTE_E4, 0,
+  0, NOTE_A4, 0, NOTE_B4, 0, NOTE_AS4, NOTE_A4, 0,
+  NOTE_G4, NOTE_E5, NOTE_G5, NOTE_A5, 0, NOTE_F5, NOTE_G5, 0,
+  NOTE_E5, 0, NOTE_C5, 0, NOTE_D5, NOTE_B4, 0, 0,
+
+  0, NOTE_G5, NOTE_FS5, NOTE_F5, 0, NOTE_DS5, 0, NOTE_E5,
+  0, NOTE_GS4, NOTE_A4, NOTE_C5, 0, NOTE_A4, NOTE_C5, NOTE_D5,
+  0, NOTE_G5, NOTE_FS5, NOTE_F5, 0, NOTE_DS5, 0, NOTE_E5,
+  0, NOTE_C6, 0, NOTE_C6, NOTE_C6, 0, 0, 0,
+
+  NOTE_G5, NOTE_FS5, NOTE_F5, 0, NOTE_DS5, 0, NOTE_E5, 0,
+  NOTE_GS4, NOTE_A4, NOTE_C5, 0, NOTE_A4, NOTE_C5, NOTE_D5, 0,
+  NOTE_DS5, 0, 0, NOTE_D5, 0, 0, NOTE_C5, 0,
+  0, 0, 0, 0, 0, 0, 0, 0,
+
+  NOTE_G5, NOTE_FS5, NOTE_F5, 0, NOTE_DS5, 0, NOTE_E5, 0,
+  NOTE_GS4, NOTE_A4, NOTE_C5, 0, NOTE_A4, NOTE_C5, NOTE_D5, 0,
+  NOTE_G5, NOTE_FS5, NOTE_F5, 0, NOTE_DS5, 0, NOTE_E5, 0,
+  NOTE_C6, 0, NOTE_C6, NOTE_C6, 0, 0, 0, 0,
+
+  NOTE_G5, NOTE_FS5, NOTE_F5, 0, NOTE_DS5, 0, NOTE_E5, 0,
+  NOTE_GS4, NOTE_A4, NOTE_C5, 0, NOTE_A4, NOTE_C5, NOTE_D5, 0,
+  NOTE_DS5, 0, 0, NOTE_D5, 0, 0, NOTE_C5, 0
+};
+
+int melody_durations[] = {
+  125, 125, 125, 125, 167, 125, 125, 125,
+  125, 375, 125, 125, 125, 375, 125, 125,
+
+  125, 250, 125, 125, 250, 125, 125, 250,
+  125, 125, 125, 125, 125, 125, 42, 125,
+  125, 125, 125, 125, 125, 125, 125, 125,
+  125, 125, 125, 125, 125, 125, 125, 125,
+
+  125, 250, 125, 125, 250, 125, 125, 250,
+  125, 125, 125, 125, 125, 125, 42, 125,
+  125, 125, 125, 125, 125, 125, 125, 125,
+  125, 125, 125, 125, 125, 125, 375, 125,
+
+  125, 125, 125, 125, 42, 125, 125, 125,
+  167, 125, 125, 125, 125, 125, 125, 125,
+  250, 125, 125, 125, 42, 125, 125, 125,
+  167, 125, 125, 125, 125, 625, 125, 125,
+
+  125, 125, 125, 42, 125, 125, 125, 167,
+  125, 125, 125, 125, 125, 125, 125, 250,
+  125, 250, 125, 125, 250, 125, 125, 1125,
+  125, 125, 125, 125, 125, 125, 125, 125,
+
+  125, 125, 125, 42, 125, 125, 125, 167,
+  125, 125, 125, 125, 125, 125, 125, 250,
+  125, 125, 125, 42, 125, 125, 125, 167,
+  125, 125, 125, 125, 625, 125, 125, 125,
+
+  125, 125, 125, 42, 125, 125, 125, 167,
+  125, 125, 125, 125, 125, 125, 125, 250,
+  125, 250, 125, 125, 250, 125, 125, 125
+};
+
+int zelda_hz[] = {
+  370, 466, 554, 740, 932, 370, 466, 554, 698, 740,
+  932, 1109, 370, 466, 494, 554, 622, 698, 740, 740,
+  932, 988, 1109, 1245, 740, 988, 1245, 1480, 740, 932,
+  1109, 1480, 1480, 2217, 740, 1480, 740, 1480, 740, 1480,
+  740, 1480
+};
+
+int zelda_durations[] = {
+  40, 40, 40, 40, 40, 29, 29, 29, 29, 29,
+  29, 29, 17, 17, 17, 17, 17, 17, 17, 17,
+  17, 17, 17, 17, 50, 50, 50, 50, 33, 33,
+  33, 33, 33, 33, 100, 100, 100, 100, 100, 100,
+  100, 100
+};
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c2;
+
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim8;
+TIM_HandleTypeDef htim9;
+TIM_HandleTypeDef htim12;
+TIM_HandleTypeDef htim14;
+
+UART_HandleTypeDef huart3;
+
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for showTask */
+osThreadId_t showTaskHandle;
+const osThreadAttr_t showTask_attributes = {
+  .name = "showTask",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for motorTask */
+osThreadId_t motorTaskHandle;
+const osThreadAttr_t motorTask_attributes = {
+  .name = "motorTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for encoderTask */
+osThreadId_t encoderTaskHandle;
+const osThreadAttr_t encoderTask_attributes = {
+  .name = "encoderTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for servoTask */
+osThreadId_t servoTaskHandle;
+const osThreadAttr_t servoTask_attributes = {
+  .name = "servoTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for ultrasonicTask */
+osThreadId_t ultrasonicTaskHandle;
+const osThreadAttr_t ultrasonicTask_attributes = {
+  .name = "ultrasonicTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for readIMUTask */
+osThreadId_t readIMUTaskHandle;
+const osThreadAttr_t readIMUTask_attributes = {
+  .name = "readIMUTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for rxSerialTask */
+osThreadId_t rxSerialTaskHandle;
+const osThreadAttr_t rxSerialTask_attributes = {
+  .name = "rxSerialTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for frontWheelCalib */
+osThreadId_t frontWheelCalibHandle;
+const osThreadAttr_t frontWheelCalib_attributes = {
+  .name = "frontWheelCalib",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for buzzerTask */
+osThreadId_t buzzerTaskHandle;
+const osThreadAttr_t buzzerTask_attributes = {
+  .name = "buzzerTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for irSensorTask */
+osThreadId_t irSensorTaskHandle;
+const osThreadAttr_t irSensorTask_attributes = {
+  .name = "irSensorTask",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* USER CODE BEGIN PV */
+
+// Timeout
+//volatile uint8_t isTimeOut = 0;
+
+
+// Ultrasonic
+volatile uint16_t echo=0;
+volatile uint16_t tc1, tc2;
+volatile uint8_t isRising = 0;
+
+// RxSerial
+volatile uint8_t rxBuffer[256] = {0};
+volatile uint8_t rxTemp = 0;
+volatile uint8_t bufferIndex = 0;     // Index for command buffer
+volatile uint8_t commandReady = 0;     // Flag to indicate complete command received
+volatile uint8_t buf[256] = {0};
+volatile uint8_t buf1[256] = {0};
+volatile uint8_t buf2[256] = {0};
+volatile uint8_t buf3[256] = {0};
+volatile uint8_t buf4[256] = {0};
+
+// IMU
+volatile float gyro_z_dps = 0.0f;
+volatile float complementary_filter_angle = 0.0f; // Global to store the fused angle
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
+
+// BGM
+volatile enum {MUTE, BGM, CAPTURE, DONE} music = MUTE;
+
+volatile uint8_t isContinue = 1;
+
+// Turning
+volatile float currentAngle = 0.0f;
+volatile float targetAngle = 0.0f;
+volatile uint8_t isTurning = 0;
+volatile uint8_t isFrontCalib = 0;
+volatile uint32_t lastAngleUpdateTime = 0;
+
+// Task2
+volatile uint8_t capture1 = 0; // 0=waiting, 1=left, 2=right
+volatile uint8_t capture2 = 0; // 0=waiting, 1=left, 2=right
+volatile uint8_t isToMove = 0;
+volatile float x = 0.0f;
+volatile float y = 0.0f;
+volatile float placeholder = 0.0f;
+volatile enum {OBS1FORWARD, OBS1CAPTURE, OBS1TURN, OBS2FORWARD, OBS2CAPTURE, OBS2TURN1, OBS2FOLLOW, OBS2TURN2, OBS2RETURN, PARKING, TASK2DONE} task2State = OBS1FORWARD;
+const uint8_t capture1Req[11] = "!CAPTURE1;\0";
+const uint8_t capture2Req[11] = "!CAPTURE2;\0";
+
+// WHEEL
+const float ENCODER_COUNTS_PER_REVOLUTION = 1540.0f;
+const float WHEEL_CIRCUMFERENCE_CM = 6.5f*3.14f;
+
+// DC Motor PID
+const PID_Controller defaultPid = {1.0f, 0.8f, 0.15f, 0, 0, 200, 0, 0};
+volatile PID_Controller pidA = defaultPid;
+volatile PID_Controller pidB = defaultPid;
+
+volatile int16_t magX, magY, magZ; // Raw magnetometer readings
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_TIM4_Init(void);
+static void MX_TIM2_Init(void);
+static void MX_TIM9_Init(void);
+static void MX_TIM12_Init(void);
+static void MX_TIM8_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_TIM14_Init(void);
+static void MX_I2C2_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_TIM1_Init(void);
+void StartDefaultTask(void *argument);
+void show(void *argument);
+void motor(void *argument);
+void encoder(void *argument);
+void servo(void *argument);
+void ultrasonic(void *argument);
+void readIMU(void *argument);
+void rxSerial(void *argument);
+void frontWheelCalibrationTask(void *argument);
+void buzzer(void *argument);
+void irSensor(void *argument);
+
+/* USER CODE BEGIN PFP */
+void delay_us(uint16_t us);
+void motorDriveEnable(void);
+void motorStop(void);
+float getFilteredUltrasonicDist(void);
+uint8_t motorPidForward(MotorCommand_t cmd, uint8_t isStateChanged);
+void rxSerialParse(void);
+
+
+// ---------------- MOTOR A CONTROL ----------------
+void motorForwardA(int pwmVal);
+
+void motorReverseA(int pwmVal);
+
+// ---------------- MOTOR B CONTROL ----------------
+void motorForwardB(int pwmVal);
+
+void motorReverseB(int pwmVal);
+
+void setServoAngle(int pwm);
+
+static void OLED_PrintStatus(uint8_t leftDet, uint8_t rightDet){
+  char line1[24];
+  char line2[24];
+  snprintf(line1, sizeof(line1), "LEFT : %s",  leftDet  ? "DETECTED" : "CLEAR   ");
+  snprintf(line2, sizeof(line2), "RIGHT: %s",  rightDet ? "DETECTED" : "CLEAR   ");
+  OLED_Clear();
+  OLED_ShowString(0, 0,  (uint8_t*)"IR OBSTACLE");
+  OLED_ShowString(0, 20, (uint8_t*)line1);
+  OLED_ShowString(0, 40, (uint8_t*)line2);
+  OLED_Refresh_Gram();   // remove if lib auto-refreshes
+}
+
+// IMU20498
+void icm20948_init(void){
+    uint8_t data;
+
+    // Wake up
+    data = 0x01;
+    HAL_I2C_Mem_Write(&hi2c2, ICM20948_I2C_ADDR, 0x06, I2C_MEMADD_SIZE_8BIT, &data, 1, 1000);
+
+    // Enable accel & gyro
+    data = 0x00;
+    HAL_I2C_Mem_Write(&hi2c2, ICM20948_I2C_ADDR, 0x07, I2C_MEMADD_SIZE_8BIT, &data, 1, 1000);
+
+    // Disable ICM internal I2C master (required for BYPASS)
+	data = 0x00; // USER_CTRL (0x03)
+	HAL_I2C_Mem_Write(&hi2c2, ICM20948_I2C_ADDR, 0x03, I2C_MEMADD_SIZE_8BIT, &data, 1, 1000);
+
+	// Enable BYPASS so MCU can talk to AK09916 at 0x0C
+	data = 0x02; // INT_PIN_CFG (0x0F): BYPASS_EN=1
+	HAL_I2C_Mem_Write(&hi2c2, 0x68<<1, 0x0F, I2C_MEMADD_SIZE_8BIT, &data, 1, 1000);
+
+	// Put AK09916 into continuous mode (e.g., 100 Hz)
+	data = 0x08; // CNTL2 (0x31): 100 Hz
+	HAL_I2C_Mem_Write(&hi2c2, 0x0C<<1, 0x31, I2C_MEMADD_SIZE_8BIT, &data, 1, 1000);
+}
+
+
+
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+
+QueueHandle_t motorCommandQueue;
+
+volatile float distance;
+volatile uint8_t leftNow;
+volatile uint8_t rightNow;
+
+void motorDriveEnable(void){
+	HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+	HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
+	HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1);
+	HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2);
+}
+
+void motorStopA(void){
+	__HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_3, 7199);
+	__HAL_TIM_SetCompare(&htim4, TIM_CHANNEL_4, 7199);
+}
+
+void motorStopB(void){
+	__HAL_TIM_SetCompare(&htim9, TIM_CHANNEL_1, 7199);
+	__HAL_TIM_SetCompare(&htim9, TIM_CHANNEL_2, 7199);
+}
+
+void motorStop(void){
+	motorStopA();
+	motorStopB();
+}
+
+void motorForwardA(int pwmVal) {
+	__HAL_TIM_SetCompare(&htim4,TIM_CHANNEL_4,0); // set IN1 to maximum PWM (7199) for '1'
+    __HAL_TIM_SetCompare(&htim4,TIM_CHANNEL_3, pwmVal); // PWM to Motor A (IN2)
+//    __HAL_TIM_SetCompare(&htim4,TIM_CHANNEL_4, 7199-pwmVal); // set IN1 to maximum PWM (7199) for '1'
+//    __HAL_TIM_SetCompare(&htim4,TIM_CHANNEL_3, 7199); // PWM to Motor A (IN2)
+}
+
+void motorReverseA(int pwmVal) {
+	__HAL_TIM_SetCompare(&htim4,TIM_CHANNEL_3, 0);
+    __HAL_TIM_SetCompare(&htim4,TIM_CHANNEL_4, pwmVal); // PWM to Motor A (IN1)
+//    __HAL_TIM_SetCompare(&htim4,TIM_CHANNEL_3, 7199-pwmVal);
+//    __HAL_TIM_SetCompare(&htim4,TIM_CHANNEL_4, 7199); // PWM to Motor A (IN1)
+}
+
+void motorForwardB(int pwmVal) {
+	__HAL_TIM_SetCompare(&htim9,TIM_CHANNEL_2, 0);
+	__HAL_TIM_SetCompare(&htim9, TIM_CHANNEL_1, pwmVal); // PWM to Motor B (IN2)
+//	__HAL_TIM_SetCompare(&htim9,TIM_CHANNEL_2, 7199-pwmVal);
+//	__HAL_TIM_SetCompare(&htim9, TIM_CHANNEL_1, 7199); // PWM to Motor B (IN2)
+}
+
+void motorReverseB(int pwmVal) {
+	__HAL_TIM_SetCompare(&htim9,TIM_CHANNEL_1, 0);
+	__HAL_TIM_SetCompare(&htim9, TIM_CHANNEL_2, pwmVal); // PWM to Motor B (IN1)
+//    __HAL_TIM_SetCompare(&htim9,TIM_CHANNEL_1, 7199-pwmVal);
+//    __HAL_TIM_SetCompare(&htim9, TIM_CHANNEL_2, 7199); // PWM to Motor B (IN1)
+}
+
+uint8_t motorPidForward(MotorCommand_t cmd, uint8_t isStateChanged) {
+//	float PoutA, PoutB, IoutA, IoutB, DoutA, DoutB, errorA, errorB, derivativeA, derivativeB;
+	static float totalDistanceA = 0.0f;
+	static float totalDistanceB = 0.0f;
+	static uint32_t lastEncoderA = 0;
+	static uint32_t lastEncoderB = 0;
+	static float targetDistance = 0.0f;
+	static uint32_t hasTargetDistance = 0;
+	static float headingIntegral = 0.0f;
+	static float prevHeadingError = 0.0f;
+
+	if(isStateChanged) {
+//		pidA = defaultPid;
+//		pidB = defaultPid;
+//		pidA.target_speed = cmd.param1Speed;
+//		pidB.target_speed = cmd.param1Speed;
+		headingIntegral = 0.0f;
+		prevHeadingError = 0.0f;
+		isFrontCalib = 1;
+		isTurning = 0;
+		setServoAngle(SERVO_CENTER);
+		osDelay(10);
+
+		totalDistanceA = 0.0f;
+		totalDistanceB = 0.0f;
+		if(cmd.param2DistAngle > 0){
+			hasTargetDistance = 1;
+			targetDistance = (float)cmd.param2DistAngle; // param2 represents distance in cm
+		}else{
+			hasTargetDistance = 0;
+			targetDistance = 0.0f;
+		}
+		lastEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+		lastEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	}
+
+	int32_t speedA = cmd.param1Speed;
+	int32_t speedB = cmd.param1Speed;
+
+	int32_t currentEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+	int32_t diffA;
+	int32_t rawDiffA = currentEncoderA - lastEncoderA;
+	if (rawDiffA > 32767) {
+	    // Underflow: encoder went from small number to large number (reverse)
+	    diffA = rawDiffA - 65536;
+	} else if (rawDiffA < -32767) {
+	    // Overflow: encoder went from large number to small number (forward)
+	    diffA = rawDiffA + 65536;
+	} else {
+	    diffA = rawDiffA;
+	}
+//	sprintf(buf2, "RawDiff: %d    ", rawDiff);
+//	sprintf(buf3, "CEncA: %d    ", currentEncoderA);
+//	sprintf(buf4, "LEncA: %d    ", lastEncoderA);
+	lastEncoderA = currentEncoderA;
+
+	int32_t currentEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	int32_t diffB = 0;
+	int32_t rawDiffB = currentEncoderB - lastEncoderB;
+	if (rawDiffB > 32767) {
+		// Underflow: encoder went from small number to large number (reverse)
+		diffB = rawDiffB - 65536;
+	} else if (rawDiffB < -32767) {
+		// Overflow: encoder went from large number to small number (forward)
+		diffB = rawDiffB + 65536;
+	} else {
+		diffB = rawDiffB;
+	}
+	lastEncoderB = currentEncoderB;
+
+	float distanceA = (float)diffA / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceA += distanceA;
+	float distanceB = (float)diffB / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceB -= distanceB; // MotorB Encoder is reverse
+
+	if (hasTargetDistance && totalDistanceA >= targetDistance - 1.6f) {
+	    motorStop();
+	    isFrontCalib = 0;
+	    // Display completion message
+	    sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	    sprintf(buf3, "EaD: %.1f", totalDistanceA);
+//	    sprintf(buf4, "EbD: %.1f", totalDistanceB);
+	    setServoAngle(SERVO_CENTER);
+	    return 1;
+	}
+
+	if (hasTargetDistance && targetDistance-totalDistanceA < 50) { // Slow down in last 30cm
+			if(targetDistance-totalDistanceA<10) {
+				if(speedA>850){
+					speedA = 850;
+					speedB = 850;
+				}
+			}else if(targetDistance-totalDistanceA<20) {
+				if(speedA>3000){
+					speedA = 4000;
+					speedB = 4000;
+				}
+			}else {
+				if(speedA>5000){
+					speedA = 5000;
+					speedB = 5000;
+				}
+			}
+			sprintf(buf1, "Slowing down..."	);
+	//		sprintf(buf2, "pwmA: %d", speedA);
+	//		sprintf(buf3, "pwmB: %d", speedB);
+	//		motorForwardA(speedA);
+	//		motorForwardB(speedB);
+	//		return 0;
+		}else{
+			sprintf(buf1, "GoGoGo..."	);
+		}
+
+	// MotorA & MotorB speed difference fix
+	float headingError = totalDistanceA - totalDistanceB;
+	const float Kp_heading = 1.5f;
+	const float Ki_heading = 0.01f;
+	const float Kd_heading = 1.0f;
+
+	headingIntegral += headingError;
+	if(headingIntegral > 100) headingIntegral = 100;
+	if(headingIntegral < -100) headingIntegral = -100;
+
+	float headingDerivative = headingError - prevHeadingError;
+	prevHeadingError = headingError;
+	float headingCorrection = Kp_heading * headingError + Ki_heading * headingIntegral + Kd_heading * headingDerivative;
+
+	speedA -= headingCorrection;
+	speedB += headingCorrection;
+
+	if (speedA > 7199) speedA = 7199;
+	if (speedA < 0) speedA = 0;
+	if (speedB > 7199) speedB = 7199;
+	if (speedB < 0) speedB = 0;
+
+//	sprintf(buf1, "fwd targetV: %d", pidA.target_speed);
+//	sprintf(buf2, "pwmA: %d", speedA);
+//	sprintf(buf3, "pwmB: %d", speedB);
+//	sprintf(buf2, "TargetD: %.1fcm", targetDistance);
+//	sprintf(buf3, "ActualA: %.1fcm", totalDistanceA);
+//	sprintf(buf4, "ActualB: %.1fcm", totalDistanceB);
+//	sprintf(buf3, "EncA: %d", currentEncoderA);
+//	sprintf(buf4, "EncB: %d", currentEncoderB);
+
+//	motorForwardA(cmd.param1Speed);
+//	motorForwardB(cmd.param1Speed);
+
+//  PID output
+	motorForwardA(speedA);
+	motorForwardB(speedB);
+
+	sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	sprintf(buf3, "ActualA: %.1f", totalDistanceA);
+//	sprintf(buf4, "HeadC: %.1f", headingCorrection);
+
+	return 0;
+}
+
+uint8_t motorPidForwardF(MotorCommandF_t cmd, uint8_t isStateChanged) {
+//	float PoutA, PoutB, IoutA, IoutB, DoutA, DoutB, errorA, errorB, derivativeA, derivativeB;
+	static float totalDistanceA = 0.0f;
+	static float totalDistanceB = 0.0f;
+	static uint32_t lastEncoderA = 0;
+	static uint32_t lastEncoderB = 0;
+	static float targetDistance = 0.0f;
+	static uint32_t hasTargetDistance = 0;
+	static float headingIntegral = 0.0f;
+	static float prevHeadingError = 0.0f;
+
+	if(isStateChanged) {
+//		pidA = defaultPid;
+//		pidB = defaultPid;
+//		pidA.target_speed = cmd.param1Speed;
+//		pidB.target_speed = cmd.param1Speed;
+		headingIntegral = 0.0f;
+		prevHeadingError = 0.0f;
+		isFrontCalib = 1;
+		isTurning = 0;
+		setServoAngle(SERVO_CENTER);
+		osDelay(10);
+
+		totalDistanceA = 0.0f;
+		totalDistanceB = 0.0f;
+		if(cmd.param2DistAngle > 0){
+			hasTargetDistance = 1;
+			targetDistance = cmd.param2DistAngle; // param2 represents distance in cm
+		}else{
+			hasTargetDistance = 0;
+			targetDistance = 0.0f;
+		}
+		lastEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+		lastEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	}
+
+	int32_t speedA = cmd.param1Speed;
+	int32_t speedB = cmd.param1Speed;
+
+	int32_t currentEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+	int32_t diffA;
+	int32_t rawDiffA = currentEncoderA - lastEncoderA;
+	if (rawDiffA > 32767) {
+	    // Underflow: encoder went from small number to large number (reverse)
+	    diffA = rawDiffA - 65536;
+	} else if (rawDiffA < -32767) {
+	    // Overflow: encoder went from large number to small number (forward)
+	    diffA = rawDiffA + 65536;
+	} else {
+	    diffA = rawDiffA;
+	}
+//	sprintf(buf2, "RawDiff: %d    ", rawDiff);
+//	sprintf(buf3, "CEncA: %d    ", currentEncoderA);
+//	sprintf(buf4, "LEncA: %d    ", lastEncoderA);
+	lastEncoderA = currentEncoderA;
+
+	int32_t currentEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	int32_t diffB = 0;
+	int32_t rawDiffB = currentEncoderB - lastEncoderB;
+	if (rawDiffB > 32767) {
+		// Underflow: encoder went from small number to large number (reverse)
+		diffB = rawDiffB - 65536;
+	} else if (rawDiffB < -32767) {
+		// Overflow: encoder went from large number to small number (forward)
+		diffB = rawDiffB + 65536;
+	} else {
+		diffB = rawDiffB;
+	}
+	lastEncoderB = currentEncoderB;
+
+	float distanceA = (float)diffA / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceA += distanceA;
+	float distanceB = (float)diffB / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceB -= distanceB; // MotorB Encoder is reverse
+
+	if (hasTargetDistance && totalDistanceA >= targetDistance - 0.8f) {
+	    motorStop();
+	    isFrontCalib = 0;
+	    // Display completion message
+	    sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	    sprintf(buf3, "EaD: %.1f", totalDistanceA);
+//	    sprintf(buf4, "EbD: %.1f", totalDistanceB);
+	    setServoAngle(SERVO_CENTER);
+	    return 1;
+	}
+
+	if (hasTargetDistance && targetDistance-totalDistanceA < 50) { // Slow down in last 30cm
+			if(targetDistance-totalDistanceA<5) {
+				if(speedA>800){
+					speedA = 800;
+					speedB = 800;
+				}
+			}else if(targetDistance-totalDistanceA<10) {
+				if(speedA>1200){
+					speedA = 1200;
+					speedB = 1200;
+				}
+			}
+			else if(targetDistance-totalDistanceA<20) {
+				if(speedA>3000){
+					speedA = 4000;
+					speedB = 4000;
+				}
+			}else {
+				if(speedA>5000){
+					speedA = 5000;
+					speedB = 5000;
+				}
+			}
+			sprintf(buf1, "Slowing down..."	);
+	//		sprintf(buf2, "pwmA: %d", speedA);
+	//		sprintf(buf3, "pwmB: %d", speedB);
+	//		motorForwardA(speedA);
+	//		motorForwardB(speedB);
+	//		return 0;
+		}else{
+			sprintf(buf1, "GoGoGo..."	);
+		}
+
+	// MotorA & MotorB speed difference fix
+	float headingError = totalDistanceA - totalDistanceB;
+	const float Kp_heading = 1.0f;
+	const float Ki_heading = 1.0f;
+	const float Kd_heading = 1.0f;
+
+	headingIntegral += headingError;
+	if(headingIntegral > 100) headingIntegral = 100;
+	if(headingIntegral < -100) headingIntegral = -100;
+
+	float headingDerivative = headingError - prevHeadingError;
+	prevHeadingError = headingError;
+	float headingCorrection = Kp_heading * headingError + Ki_heading * headingIntegral + Kd_heading * headingDerivative;
+
+	speedA -= headingCorrection;
+	speedB += headingCorrection;
+
+	if (speedA > 7199) speedA = 7199;
+	if (speedA < 0) speedA = 0;
+	if (speedB > 7199) speedB = 7199;
+	if (speedB < 0) speedB = 0;
+
+//	sprintf(buf1, "fwd targetV: %d", pidA.target_speed);
+//	sprintf(buf2, "pwmA: %d", speedA);
+//	sprintf(buf3, "pwmB: %d", speedB);
+//	sprintf(buf2, "TargetD: %.1fcm", targetDistance);
+//	sprintf(buf3, "ActualA: %.1fcm", totalDistanceA);
+//	sprintf(buf4, "ActualB: %.1fcm", totalDistanceB);
+//	sprintf(buf3, "EncA: %d", currentEncoderA);
+//	sprintf(buf4, "EncB: %d", currentEncoderB);
+
+//	motorForwardA(cmd.param1Speed);
+//	motorForwardB(cmd.param1Speed);
+
+//  PID output
+	motorForwardA(speedA);
+	motorForwardB(speedB);
+
+	sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	sprintf(buf3, "ActualA: %.1f", totalDistanceA);
+//	sprintf(buf4, "HeadC: %.1f", headingCorrection);
+
+	return 0;
+}
+
+uint8_t motorPidForwardTask2UntilSensor(MotorCommandF_t cmd, uint8_t isStateChanged, uint8_t *sensorNow, float *distPtr) {
+    static float totalDistanceA = 0.0f;
+    static float totalDistanceB = 0.0f;
+    static uint32_t lastEncoderA = 0;
+    static uint32_t lastEncoderB = 0;
+    static float headingIntegral = 0.0f;
+    static float prevHeadingError = 0.0f;
+    static uint8_t confirmStop = 0;
+    static uint32_t debugCount = 0;
+
+    if(isStateChanged) {
+        headingIntegral = 0.0f;
+        prevHeadingError = 0.0f;
+        isFrontCalib = 1;
+        isTurning = 0;
+        setServoAngle(SERVO_CENTER);
+        confirmStop = 0;
+        isToMove = 1;
+        debugCount = 0;
+        osDelay(10);
+
+        totalDistanceA = 0.0f;
+        totalDistanceB = 0.0f;
+        lastEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+        lastEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+    }
+
+    int32_t speedA = cmd.param1Speed;
+    int32_t speedB = cmd.param1Speed;
+
+    // --- Encoder handling (same as your code) ---
+    int32_t currentEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+    int32_t rawDiffA = currentEncoderA - lastEncoderA;
+    int32_t diffA;
+    if (rawDiffA > 32767) diffA = rawDiffA - 65536;
+    else if (rawDiffA < -32767) diffA = rawDiffA + 65536;
+    else diffA = rawDiffA;
+    lastEncoderA = currentEncoderA;
+
+    int32_t currentEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+    int32_t rawDiffB = currentEncoderB - lastEncoderB;
+    int32_t diffB;
+    if (rawDiffB > 32767) diffB = rawDiffB - 65536;
+    else if (rawDiffB < -32767) diffB = rawDiffB + 65536;
+    else diffB = rawDiffB;
+    lastEncoderB = currentEncoderB;
+
+    float distanceA = (float)diffA / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+    totalDistanceA += distanceA;
+    (*distPtr) += distanceA;
+    float distanceB = (float)diffB / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+    totalDistanceB -= distanceB; // MotorB reversed
+
+    // --- Stop condition: sensor falling edge ---
+    if (*sensorNow == 1) {
+        confirmStop++;
+        if (confirmStop > 3) { // a few cycles to debounce
+            motorStop();
+            isFrontCalib = 0;
+            sprintf(buf1, "Sensor Stop!");
+            sprintf(buf2, "Dist: %.1f", *distPtr);
+            setServoAngle(SERVO_CENTER);
+            confirmStop = 0;
+            return 1; // completed
+        }
+    } else {
+        confirmStop = 0;
+    }
+
+
+    // --- Heading correction (same as original) ---
+    float headingError = totalDistanceA - totalDistanceB;
+    const float Kp_heading = 1.0f;
+    const float Ki_heading = 1.0f;
+    const float Kd_heading = 1.0f;
+
+    headingIntegral += headingError;
+    if (headingIntegral > 100) headingIntegral = 100;
+    if (headingIntegral < -100) headingIntegral = -100;
+
+    float headingDerivative = headingError - prevHeadingError;
+    prevHeadingError = headingError;
+    float headingCorrection = Kp_heading * headingError +
+                              Ki_heading * headingIntegral +
+                              Kd_heading * headingDerivative;
+
+    speedA -= headingCorrection;
+    speedB += headingCorrection;
+
+    if (speedA > 7199) speedA = 7199;
+    if (speedA < 0) speedA = 0;
+    if (speedB > 7199) speedB = 7199;
+    if (speedB < 0) speedB = 0;
+
+    motorForwardA(speedA);
+    motorForwardB(speedB);
+
+    sprintf(buf2, "EncA: %.1f", totalDistanceA);
+    sprintf(buf3, "EncB: %.1f", totalDistanceB);
+
+    return 0;
+}
+
+uint8_t motorPidForwardTask2Until(MotorCommandF_t cmd, uint8_t isStateChanged) {
+
+	// Param2 Dist: Stop until cmd.param2DistAngle (distance measured from the ultrasonic sensor)
+	// Param2 Dist: -1 - Stopping when isToMove=0;
+
+	static float totalDistanceA = 0.0f;
+	static float totalDistanceB = 0.0f;
+	static uint32_t lastEncoderA = 0;
+	static uint32_t lastEncoderB = 0;
+	static float targetDistanceFromObstacle = 0.0f;
+	static float headingIntegral = 0.0f;
+	static float prevHeadingError = 0.0f;
+	static uint8_t confirmStop = 0;
+	static uint32_t debugCount = 0;
+	static uint8_t toSendReq1 = 0;
+
+	if(isStateChanged) {
+		headingIntegral = 0.0f;
+		prevHeadingError = 0.0f;
+		isFrontCalib = 1;
+		isTurning = 0;
+		setServoAngle(SERVO_CENTER);
+		confirmStop = 0;
+		isToMove = 1;
+		debugCount = 0;
+		osDelay(10);
+
+		totalDistanceA = 0.0f;
+		totalDistanceB = 0.0f;
+		if(cmd.param2DistAngle > 0.0f){
+			targetDistanceFromObstacle = cmd.param2DistAngle; // param2 represents distance in mm
+			toSendReq1 = 1;
+		}else{
+			targetDistanceFromObstacle = -1.0f;
+		}
+		lastEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+		lastEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	}
+
+	int32_t speedA = cmd.param1Speed;
+	int32_t speedB = cmd.param1Speed;
+
+	int32_t currentEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+	int32_t diffA;
+	int32_t rawDiffA = currentEncoderA - lastEncoderA;
+	if (rawDiffA > 32767) {
+	    // Underflow: encoder went from small number to large number (reverse)
+	    diffA = rawDiffA - 65536;
+	} else if (rawDiffA < -32767) {
+	    // Overflow: encoder went from large number to small number (forward)
+	    diffA = rawDiffA + 65536;
+	} else {
+	    diffA = rawDiffA;
+	}
+//	sprintf(buf2, "RawDiff: %d    ", rawDiff);
+//	sprintf(buf3, "CEncA: %d    ", currentEncoderA);
+//	sprintf(buf4, "LEncA: %d    ", lastEncoderA);
+	lastEncoderA = currentEncoderA;
+
+	int32_t currentEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	int32_t diffB = 0;
+	int32_t rawDiffB = currentEncoderB - lastEncoderB;
+	if (rawDiffB > 32767) {
+		// Underflow: encoder went from small number to large number (reverse)
+		diffB = rawDiffB - 65536;
+	} else if (rawDiffB < -32767) {
+		// Overflow: encoder went from large number to small number (forward)
+		diffB = rawDiffB + 65536;
+	} else {
+		diffB = rawDiffB;
+	}
+	lastEncoderB = currentEncoderB;
+
+	float distanceA = (float)diffA / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceA += distanceA;
+	float distanceB = (float)diffB / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceB -= distanceB; // MotorB Encoder is reverse
+
+	if (targetDistanceFromObstacle < 0.0f && isToMove == 0) return 1;
+
+	if (targetDistanceFromObstacle > 0.0f && distance <= targetDistanceFromObstacle +8.0f) {
+		if(confirmStop > 5){
+			motorStop();
+			isFrontCalib = 0;
+			setServoAngle(SERVO_CENTER);
+			confirmStop = 0;
+			return 1;
+		}else{
+			confirmStop += 1;
+		}
+	}else{
+		confirmStop = 0;
+	}
+
+	if(distance < targetDistanceFromObstacle+1500.0f && toSendReq1){ // for testing, change to 300
+		HAL_UART_Transmit(&huart3,(uint8_t *)capture1Req,strlen(capture1Req),0xFFFF);
+		toSendReq1 = 0;
+	}
+
+	if (targetDistanceFromObstacle > 0.0f && distance < targetDistanceFromObstacle+500.0f) { // Slow down in last 50cm
+			if(distance < targetDistanceFromObstacle+50.0f) {
+				if(speedA>800){
+					speedA = 800;
+					speedB = 800;
+				}
+			}else if(distance < targetDistanceFromObstacle+100.0f) {
+				if(speedA>1200){
+					speedA = 1200;
+					speedB = 1200;
+				}
+			}
+			else if(distance < targetDistanceFromObstacle+200.0f) {
+				if(speedA>3000){
+					speedA = 4000;
+					speedB = 4000;
+				}
+			}else {
+				if(speedA>5000){
+					speedA = 5000;
+					speedB = 5000;
+				}
+			}
+			sprintf(buf1, "Slowing down..."	);
+		}else{
+			sprintf(buf1, "GoGoGo..."	);
+		}
+
+	// MotorA & MotorB speed difference fix
+	float headingError = totalDistanceA - totalDistanceB;
+	const float Kp_heading = 1.0f;
+	const float Ki_heading = 1.0f;
+	const float Kd_heading = 1.0f;
+
+	headingIntegral += headingError;
+	if(headingIntegral > 100) headingIntegral = 100;
+	if(headingIntegral < -100) headingIntegral = -100;
+
+	float headingDerivative = headingError - prevHeadingError;
+	prevHeadingError = headingError;
+	float headingCorrection = Kp_heading * headingError + Ki_heading * headingIntegral + Kd_heading * headingDerivative;
+
+	speedA -= headingCorrection;
+	speedB += headingCorrection;
+
+	if (speedA > 7199) speedA = 7199;
+	if (speedA < 0) speedA = 0;
+	if (speedB > 7199) speedB = 7199;
+	if (speedB < 0) speedB = 0;
+
+//  PID output
+	motorForwardA(speedA);
+	motorForwardB(speedB);
+
+//	sprintf(buf2, "ObsD: %.1f", distance);
+//	sprintf(buf3, "ActualA: %.1f", totalDistanceA);
+//	sprintf(buf4, "HeadC: %.1f", headingCorrection);
+
+	return 0;
+}
+
+uint8_t motorPidForwardBackwardsUntil(MotorCommandF_t cmd, uint8_t isStateChanged) {
+
+    static float headingIntegral = 0.0f;
+    static float prevHeadingError = 0.0f;
+    static uint32_t lastEncoderA = 0;
+    static uint32_t lastEncoderB = 0;
+    static float totalDistanceA = 0.0f;
+    static float totalDistanceB = 0.0f;
+    static uint8_t confirmStop = 0;
+    static uint32_t debugCount = 0;
+	static float targetDistanceFromObstacle = 0.0f;
+	static float direction = 1.0f;
+	static uint8_t toSendReq2 = 0;
+
+    if (isStateChanged) {
+
+        headingIntegral = 0.0f;
+        prevHeadingError = 0.0f;
+        confirmStop = 0;
+        isFrontCalib = 1;
+        isTurning = 0;
+        isToMove = 1;
+        setServoAngle(SERVO_CENTER);
+        osDelay(10);
+
+		if(cmd.param2DistAngle > 0.0f){
+			targetDistanceFromObstacle = cmd.param2DistAngle; // param2 represents distance in mm
+			toSendReq2 = 1;
+		}else{
+			targetDistanceFromObstacle = -1.0f;
+		}
+
+        totalDistanceA = 0.0f;
+        totalDistanceB = 0.0f;
+        lastEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+        lastEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+    }
+
+    // Get encoder deltas (with wraparound handling)
+    int32_t currentEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+    int32_t currentEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+
+    int32_t rawDiffA = currentEncoderA - lastEncoderA;
+    if (rawDiffA > 32767) rawDiffA -= 65536;
+    else if (rawDiffA < -32767) rawDiffA += 65536;
+    lastEncoderA = currentEncoderA;
+
+    int32_t rawDiffB = currentEncoderB - lastEncoderB;
+    if (rawDiffB > 32767) rawDiffB -= 65536;
+    else if (rawDiffB < -32767) rawDiffB += 65536;
+    lastEncoderB = currentEncoderB;
+
+    float distanceA = (float)rawDiffA / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+    float distanceB = (float)rawDiffB / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+    totalDistanceA += distanceA;
+    totalDistanceB -= distanceB;   // Motor B is reverse
+//    *distPtr += distanceA;
+    // XS help to debug this
+
+    debugCount++;
+
+    //----------------------------------------------------------------
+    // === Ultrasonic distance control logic ===
+    //----------------------------------------------------------------
+
+	if (targetDistanceFromObstacle < 0.0f && isToMove == 0) return 1;
+
+	if(debugCount % 1000 == 0) {
+		//confirmStop = 1;
+	}
+
+	if (targetDistanceFromObstacle > 0.0f && distance <= targetDistanceFromObstacle -8.0f){
+		direction = -1.0f;
+	}
+	else {
+		direction = 1.0f;
+	}
+
+	if (targetDistanceFromObstacle > 0.0f && distance <= targetDistanceFromObstacle +8.0f && distance >= targetDistanceFromObstacle - 8.0f) {
+		if(confirmStop > 3){
+			motorStop();
+			isFrontCalib = 0;
+			// Display completion message
+//			sprintf(buf2, "ObsD: %.1f", distance);
+//			sprintf(buf3, "DPtr: %.1f", *distPtr);
+			setServoAngle(SERVO_CENTER);
+			confirmStop = 0;
+			return 1;
+		}else{
+			confirmStop += 1;
+			return 0;
+		}
+	}else{
+		confirmStop = 0;
+	}
+
+	int32_t speedA = cmd.param1Speed;
+	int32_t speedB = cmd.param1Speed;
+	int32_t revSpeedA = cmd.param1Speed;
+	int32_t revSpeedB = cmd.param1Speed;
+	if (targetDistanceFromObstacle > 0.0f && distance < targetDistanceFromObstacle) { // Change speed according to distance from obstacle (reverse)
+			if(distance < targetDistanceFromObstacle -50.0f) {
+				if (distance < targetDistanceFromObstacle - 100.0f){
+					if (distance < targetDistanceFromObstacle - 150.0f){
+						if (distance < targetDistanceFromObstacle - 200.0f){
+							if (revSpeedA > 3000){
+							revSpeedA = 3000;
+							revSpeedB = 3000;
+							}
+						}
+						else {
+							if (revSpeedA > 2000){
+								revSpeedA = 2000;
+								revSpeedB = 2000;
+							}
+						}
+					}
+					else {
+						if (revSpeedA > 1500){
+							revSpeedA = 1500;
+							revSpeedB = 1500;
+						}
+					}
+				}
+				else {
+					if(toSendReq2){
+						HAL_UART_Transmit(&huart3,(uint8_t *)capture2Req,strlen(capture2Req),0xFFFF);
+						toSendReq2 = 0;
+					}
+					if (revSpeedA > 800){
+						revSpeedA = 800;
+						revSpeedB = 800;
+					}
+				}
+			}
+			else {
+				if (revSpeedA > 800){
+					revSpeedA = 800;
+					revSpeedB = 800;
+				}
+			}
+	}
+
+
+	if (targetDistanceFromObstacle > 0.0f && distance < targetDistanceFromObstacle+500.0f) { // Slow down in last 50cm
+			if(distance < targetDistanceFromObstacle+50.0f) {
+				if(speedA>800){
+					speedA = 800;
+					speedB = 800;
+				}
+			}else if(distance < targetDistanceFromObstacle+100.0f) {
+				if(speedA>1200){
+					speedA = 1200;
+					speedB = 1200;
+				}
+			}
+			else if(distance < targetDistanceFromObstacle+200.0f) {
+				if(speedA>3000){
+					speedA = 4000;
+					speedB = 4000;
+				}
+			}else {
+				if(speedA>5000){
+					speedA = 5000;
+					speedB = 5000;
+				}
+			}
+			sprintf(buf1, "Slowing down..."	);
+
+			if(distance < targetDistanceFromObstacle+300.0f && toSendReq2){
+				HAL_UART_Transmit(&huart3,(uint8_t *)capture2Req,strlen(capture2Req),0xFFFF);
+				toSendReq2 = 0;
+			}
+		}else{
+			sprintf(buf1, "GoGoGo..."	);
+		}
+
+	// MotorA & MotorB speed difference fix
+	float headingError = totalDistanceA - totalDistanceB;
+	const float Kp_heading = 1.0f;
+	const float Ki_heading = 1.0f;
+	const float Kd_heading = 1.0f;
+
+	headingIntegral += headingError;
+	if(headingIntegral > 100) headingIntegral = 100;
+	if(headingIntegral < -100) headingIntegral = -100;
+
+	float headingDerivative = headingError - prevHeadingError;
+	prevHeadingError = headingError;
+	float headingCorrection = Kp_heading * headingError + Ki_heading * headingIntegral + Kd_heading * headingDerivative;
+
+	speedA -= headingCorrection;
+	speedB += headingCorrection;
+
+	if (speedA > 7199) speedA = 7199;
+	if (speedA < 0) speedA = 0;
+	if (speedB > 7199) speedB = 7199;
+	if (speedB < 0) speedB = 0;
+
+//  PID output
+	if (direction > 0){
+		motorForwardA(speedA);
+		motorForwardB(speedB);
+	}
+	else {
+		motorReverseA(revSpeedA);
+		motorReverseB(revSpeedB);
+	}
+
+
+//	sprintf(buf2, "ObsD: %.1f", distance);
+//	sprintf(buf3, "ActualA: %.1f", totalDistanceA);
+//	sprintf(buf4, "HeadC: %.1f", headingCorrection);
+
+	return 0;
+}
+
+uint8_t motorPidReverse(MotorCommand_t cmd, uint8_t isStateChanged) {
+//	float PoutA, PoutB, IoutA, IoutB, DoutA, DoutB, errorA, errorB, derivativeA, derivativeB;
+	static float totalDistanceA = 0.0f;
+	static float totalDistanceB = 0.0f;
+	static uint32_t lastEncoderA = 0;
+	static uint32_t lastEncoderB = 0;
+	static float targetDistance = 0.0f;
+	static uint32_t hasTargetDistance = 0;
+	static float headingIntegral = 0.0f;
+	static float prevHeadingError = 0.0f;
+
+	if(isStateChanged) {
+//		pidA = defaultPid;
+//		pidB = defaultPid;
+//		pidA.target_speed = cmd.param1Speed;
+//		pidB.target_speed = cmd.param1Speed;
+		headingIntegral = 0.0f;
+		prevHeadingError = 0.0f;
+		isFrontCalib = 0;
+		isTurning = 0;
+
+		totalDistanceA = 0.0f;
+		totalDistanceB = 0.0f;
+		if(cmd.param2DistAngle > 0){
+			hasTargetDistance = 1;
+			targetDistance = (float)cmd.param2DistAngle; // param2 represents distance in cm
+		}else{
+			hasTargetDistance = 0;
+			targetDistance = 0.0f;
+		}
+		lastEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+		lastEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	}
+
+	int32_t speedA = cmd.param1Speed;
+	int32_t speedB = cmd.param1Speed;
+
+	int32_t currentEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+	int32_t diffA;
+	int32_t rawDiffA = currentEncoderA - lastEncoderA;
+	if (rawDiffA > 32767) {
+	    // Underflow: encoder went from small number to large number (reverse)
+	    diffA = rawDiffA - 65536;
+	} else if (rawDiffA < -32767) {
+	    // Overflow: encoder went from large number to small number (forward)
+	    diffA = rawDiffA + 65536;
+	} else {
+	    diffA = rawDiffA;
+	}
+//	sprintf(buf2, "RawDiff: %d    ", rawDiff);
+//	sprintf(buf3, "CEncA: %d    ", currentEncoderA);
+//	sprintf(buf4, "LEncA: %d    ", lastEncoderA);
+	lastEncoderA = currentEncoderA;
+
+	int32_t currentEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	int32_t diffB = 0;
+	int32_t rawDiffB = currentEncoderB - lastEncoderB;
+	if (rawDiffB > 32767) {
+		// Underflow: encoder went from small number to large number (reverse)
+		diffB = rawDiffB - 65536;
+	} else if (rawDiffB < -32767) {
+		// Overflow: encoder went from large number to small number (forward)
+		diffB = rawDiffB + 65536;
+	} else {
+		diffB = rawDiffB;
+	}
+	lastEncoderB = currentEncoderB;
+
+	float distanceA = (float)diffA / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceA -= distanceA;
+	float distanceB = (float)diffB / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceB += distanceB; // MotorB Encoder is reverse
+
+	if (hasTargetDistance && totalDistanceA >= targetDistance - 0.8f) {
+	    motorStop();
+	    // Display completion message
+	    sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	    sprintf(buf3, "EaD: %.1f", totalDistanceA);
+//	    sprintf(buf4, "EbD: %.1f", totalDistanceB);
+	    setServoAngle(SERVO_CENTER);
+	    return 1;
+	}
+
+	if (hasTargetDistance && targetDistance-totalDistanceA < 50) { // Slow down in last 30cm
+			if(targetDistance-totalDistanceA<5) {
+				if(speedA>800){
+					speedA = 800;
+					speedB = 800;
+				}
+			}else if(targetDistance-totalDistanceA<10) {
+				if(speedA>1200){
+					speedA = 1200;
+					speedB = 1200;
+				}
+			}
+			else if(targetDistance-totalDistanceA<20) {
+				if(speedA>3000){
+					speedA = 4000;
+					speedB = 4000;
+				}
+			}else {
+				if(speedA>5000){
+					speedA = 5000;
+					speedB = 5000;
+				}
+			}
+			sprintf(buf1, "Slowing down..."	);
+	//		sprintf(buf2, "pwmA: %d", speedA);
+	//		sprintf(buf3, "pwmB: %d", speedB);
+	//		motorForwardA(speedA);
+	//		motorForwardB(speedB);
+	//		return 0;
+		}else{
+			sprintf(buf1, "GoGoGo..."	);
+		}
+
+	// MotorA & MotorB speed difference fix
+	float headingError = totalDistanceA - totalDistanceB;
+	const float Kp_heading = 1.0f;
+	const float Ki_heading = 1.0f;
+	const float Kd_heading = 1.0f;
+
+	headingIntegral += headingError;
+	if(headingIntegral > 100) headingIntegral = 100;
+	if(headingIntegral < -100) headingIntegral = -100;
+
+	float headingDerivative = headingError - prevHeadingError;
+	prevHeadingError = headingError;
+	float headingCorrection = Kp_heading * headingError + Ki_heading * headingIntegral + Kd_heading * headingDerivative;
+
+	speedA -= headingCorrection;
+	speedB += headingCorrection;
+
+	if (speedA > 7199) speedA = 7199;
+	if (speedA < 0) speedA = 0;
+	if (speedB > 7199) speedB = 7199;
+	if (speedB < 0) speedB = 0;
+
+//	sprintf(buf1, "fwd targetV: %d", pidA.target_speed);
+//	sprintf(buf2, "pwmA: %d", speedA);
+//	sprintf(buf3, "pwmB: %d", speedB);
+//	sprintf(buf2, "TargetD: %.1fcm", targetDistance);
+//	sprintf(buf3, "ActualA: %.1fcm", totalDistanceA);
+//	sprintf(buf4, "ActualB: %.1fcm", totalDistanceB);
+//	sprintf(buf3, "EncA: %d", currentEncoderA);
+//	sprintf(buf4, "EncB: %d", currentEncoderB);
+
+//	motorForwardA(cmd.param1Speed);
+//	motorForwardB(cmd.param1Speed);
+
+//  PID output
+	motorReverseA(speedA);
+	motorReverseB(speedB);
+
+	sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	sprintf(buf3, "ActualA: %.1f", totalDistanceA);
+//	sprintf(buf4, "HeadC: %.1f", headingCorrection);
+
+	return 0;
+}
+
+uint8_t motorPidReverseF(MotorCommandF_t cmd, uint8_t isStateChanged) {
+//	float PoutA, PoutB, IoutA, IoutB, DoutA, DoutB, errorA, errorB, derivativeA, derivativeB;
+	static float totalDistanceA = 0.0f;
+	static float totalDistanceB = 0.0f;
+	static uint32_t lastEncoderA = 0;
+	static uint32_t lastEncoderB = 0;
+	static float targetDistance = 0.0f;
+	static uint32_t hasTargetDistance = 0;
+	static float headingIntegral = 0.0f;
+	static float prevHeadingError = 0.0f;
+
+	if(isStateChanged) {
+//		pidA = defaultPid;
+//		pidB = defaultPid;
+//		pidA.target_speed = cmd.param1Speed;
+//		pidB.target_speed = cmd.param1Speed;
+		headingIntegral = 0.0f;
+		prevHeadingError = 0.0f;
+		isFrontCalib = 0;
+		isTurning = 0;
+
+		totalDistanceA = 0.0f;
+		totalDistanceB = 0.0f;
+		if(cmd.param2DistAngle > 0){
+			hasTargetDistance = 1;
+			targetDistance = cmd.param2DistAngle; // param2 represents distance in cm
+		}else{
+			hasTargetDistance = 0;
+			targetDistance = 0.0f;
+		}
+		lastEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+		lastEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	}
+
+	int32_t speedA = cmd.param1Speed;
+	int32_t speedB = cmd.param1Speed;
+
+	int32_t currentEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+	int32_t diffA;
+	int32_t rawDiffA = currentEncoderA - lastEncoderA;
+	if (rawDiffA > 32767) {
+	    // Underflow: encoder went from small number to large number (reverse)
+	    diffA = rawDiffA - 65536;
+	} else if (rawDiffA < -32767) {
+	    // Overflow: encoder went from large number to small number (forward)
+	    diffA = rawDiffA + 65536;
+	} else {
+	    diffA = rawDiffA;
+	}
+//	sprintf(buf2, "RawDiff: %d    ", rawDiff);
+//	sprintf(buf3, "CEncA: %d    ", currentEncoderA);
+//	sprintf(buf4, "LEncA: %d    ", lastEncoderA);
+	lastEncoderA = currentEncoderA;
+
+	int32_t currentEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+	int32_t diffB = 0;
+	int32_t rawDiffB = currentEncoderB - lastEncoderB;
+	if (rawDiffB > 32767) {
+		// Underflow: encoder went from small number to large number (reverse)
+		diffB = rawDiffB - 65536;
+	} else if (rawDiffB < -32767) {
+		// Overflow: encoder went from large number to small number (forward)
+		diffB = rawDiffB + 65536;
+	} else {
+		diffB = rawDiffB;
+	}
+	lastEncoderB = currentEncoderB;
+
+	float distanceA = (float)diffA / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceA -= distanceA;
+	float distanceB = (float)diffB / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+	totalDistanceB += distanceB; // MotorB Encoder is reverse
+
+	if (hasTargetDistance && totalDistanceA >= targetDistance - 0.8f) {
+	    motorStop();
+	    // Display completion message
+	    sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	    sprintf(buf3, "EaD: %.1f", totalDistanceA);
+//	    sprintf(buf4, "EbD: %.1f", totalDistanceB);
+	    setServoAngle(SERVO_CENTER);
+	    return 1;
+	}
+
+	if (hasTargetDistance && targetDistance-totalDistanceA < 50) { // Slow down in last 30cm
+			if(targetDistance-totalDistanceA<5) {
+				if(speedA>800){
+					speedA = 800;
+					speedB = 800;
+				}
+			}else if(targetDistance-totalDistanceA<10) {
+				if(speedA>1200){
+					speedA = 1200;
+					speedB = 1200;
+				}
+			}
+			else if(targetDistance-totalDistanceA<20) {
+				if(speedA>3000){
+					speedA = 4000;
+					speedB = 4000;
+				}
+			}else {
+				if(speedA>5000){
+					speedA = 5000;
+					speedB = 5000;
+				}
+			}
+			sprintf(buf1, "Slowing down..."	);
+	//		sprintf(buf2, "pwmA: %d", speedA);
+	//		sprintf(buf3, "pwmB: %d", speedB);
+	//		motorForwardA(speedA);
+	//		motorForwardB(speedB);
+	//		return 0;
+		}else{
+			sprintf(buf1, "GoGoGo..."	);
+		}
+
+	// MotorA & MotorB speed difference fix
+	float headingError = totalDistanceA - totalDistanceB;
+	const float Kp_heading = 1.0f;
+	const float Ki_heading = 1.0f;
+	const float Kd_heading = 1.0f;
+
+	headingIntegral += headingError;
+	if(headingIntegral > 100) headingIntegral = 100;
+	if(headingIntegral < -100) headingIntegral = -100;
+
+	float headingDerivative = headingError - prevHeadingError;
+	prevHeadingError = headingError;
+	float headingCorrection = Kp_heading * headingError + Ki_heading * headingIntegral + Kd_heading * headingDerivative;
+
+	speedA -= headingCorrection;
+	speedB += headingCorrection;
+
+	if (speedA > 7199) speedA = 7199;
+	if (speedA < 0) speedA = 0;
+	if (speedB > 7199) speedB = 7199;
+	if (speedB < 0) speedB = 0;
+
+//	sprintf(buf1, "fwd targetV: %d", pidA.target_speed);
+//	sprintf(buf2, "pwmA: %d", speedA);
+//	sprintf(buf3, "pwmB: %d", speedB);
+//	sprintf(buf2, "TargetD: %.1fcm", targetDistance);
+//	sprintf(buf3, "ActualA: %.1fcm", totalDistanceA);
+//	sprintf(buf4, "ActualB: %.1fcm", totalDistanceB);
+//	sprintf(buf3, "EncA: %d", currentEncoderA);
+//	sprintf(buf4, "EncB: %d", currentEncoderB);
+
+//	motorForwardA(cmd.param1Speed);
+//	motorForwardB(cmd.param1Speed);
+
+//  PID output
+	motorReverseA(speedA);
+	motorReverseB(speedB);
+
+	sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	sprintf(buf3, "ActualA: %.1f", totalDistanceA);
+//	sprintf(buf4, "HeadC: %.1f", headingCorrection);
+
+	return 0;
+}
+
+// A fun function for the buzzer
+void playNote(uint16_t frequency, uint16_t duration) {
+    if (frequency == 0) {
+        HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
+    } else {
+        // Timer Freq. 1MHz
+        uint32_t timerFreq = 1000000;
+        uint32_t arr = (timerFreq / frequency) - 1;
+
+        // Adjust ARR & CCR
+        __HAL_TIM_SET_AUTORELOAD(&htim1, arr);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, arr / 10);  // 50% empty
+        __HAL_TIM_SET_COUNTER(&htim1, 0);  // 重置计数器
+        HAL_TIM_GenerateEvent(&htim1, TIM_EVENTSOURCE_UPDATE);
+        HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+    }
+    osDelay(duration);
+    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
+}
+
+
+
+//uint8_t motorPidReverse(MotorCommand_t cmd, uint8_t isStateChanged) {
+////	float PoutA, PoutB, IoutA, IoutB, DoutA, DoutB, errorA, errorB, derivativeA, derivativeB;
+//	static float totalDistanceA = 0.0f;
+//	static float totalDistanceB = 0.0f;
+//	static uint32_t lastEncoderA = 0;
+//	static uint32_t lastEncoderB = 0;
+//	static float targetDistance = 0.0f;
+//	static uint32_t hasTargetDistance = 0;
+//	static float headingIntegral = 0.0f;
+//	static float prevHeadingError = 0.0f;
+//
+//	if(isStateChanged) {
+////		pidA = defaultPid;
+////		pidB = defaultPid;
+////		pidA.target_speed = cmd.param1Speed;
+////		pidB.target_speed = cmd.param1Speed;
+//		headingIntegral = 0.0f;
+//		prevHeadingError = 0.0f;
+//		isFrontCalib = 0;
+//		isTurning = 0;
+//		osDelay(10);
+//		__HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, SERVO_CENTER);
+//
+//		totalDistanceA = 0.0f;
+//		totalDistanceB = 0.0f;
+//		if(cmd.param2DistAngle > 0){
+//			hasTargetDistance = 1;
+//			targetDistance = (float)cmd.param2DistAngle; // param2 represents distance in cm
+//		}else{
+//			hasTargetDistance = 0;
+//			targetDistance = 0.0f;
+//		}
+//		lastEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+//		lastEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+//	}
+//
+//	int32_t speedA = cmd.param1Speed;
+//	int32_t speedB = cmd.param1Speed;
+//
+//	int32_t currentEncoderA = __HAL_TIM_GET_COUNTER(&htim2);
+//	int32_t diffA;
+//	int32_t rawDiffA = currentEncoderA - lastEncoderA;
+//	if (rawDiffA > 32767) {
+//	    // Underflow: encoder went from small number to large number (reverse)
+//	    diffA = rawDiffA - 65536;
+//	} else if (rawDiffA < -32767) {
+//	    // Overflow: encoder went from large number to small number (forward)
+//	    diffA = rawDiffA + 65536;
+//	} else {
+//	    diffA = rawDiffA;
+//	}
+////	sprintf(buf2, "RawDiff: %d    ", rawDiff);
+////	sprintf(buf3, "CEncA: %d    ", currentEncoderA);
+////	sprintf(buf4, "LEncA: %d    ", lastEncoderA);
+//	lastEncoderA = currentEncoderA;
+//
+//	int32_t currentEncoderB = __HAL_TIM_GET_COUNTER(&htim3);
+//	int32_t diffB = 0;
+//	int32_t rawDiffB = currentEncoderB - lastEncoderB;
+//	if (rawDiffB > 32767) {
+//		// Underflow: encoder went from small number to large number (reverse)
+//		diffB = rawDiffB - 65536;
+//	} else if (rawDiffB < -32767) {
+//		// Overflow: encoder went from large number to small number (forward)
+//		diffB = rawDiffB + 65536;
+//	} else {
+//		diffB = rawDiffB;
+//	}
+//	lastEncoderB = currentEncoderB;
+//
+//	float distanceA = (float)diffA / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+//	totalDistanceA -= distanceA;
+//	float distanceB = (float)diffB / ENCODER_COUNTS_PER_REVOLUTION * WHEEL_CIRCUMFERENCE_CM;
+//	totalDistanceB += distanceB; // MotorB Encoder is reverse
+//
+//	if (hasTargetDistance && totalDistanceA >= targetDistance - 0.9f) {
+//	    motorStop();
+//	    // Display completion message
+//	    sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	    sprintf(buf3, "EaD: %.1f", totalDistanceA);
+//	    sprintf(buf4, "EbD: %.1f", totalDistanceB);
+//	    return 1;
+//	}
+//
+//	if (hasTargetDistance && targetDistance-totalDistanceA < 50) { // Slow down in last 30cm
+//				if(targetDistance-totalDistanceA<5) {
+//					if(speedA>800){
+//						speedA = 800;
+//						speedB = 800;
+//					}
+//				}else if(targetDistance-totalDistanceA<10) {
+//					if(speedA>1200){
+//						speedA = 1200;
+//						speedB = 1200;
+//					}
+//				}
+//				else if(targetDistance-totalDistanceA<20) {
+//					if(speedA>3000){
+//						speedA = 4000;
+//						speedB = 4000;
+//					}
+//				}else {
+//					if(speedA>5000){
+//						speedA = 5000;
+//						speedB = 5000;
+//					}
+//				}
+//				sprintf(buf1, "Slowing down..."	);
+//		//		sprintf(buf2, "pwmA: %d", speedA);
+//		//		sprintf(buf3, "pwmB: %d", speedB);
+//		//		motorForwardA(speedA);
+//		//		motorForwardB(speedB);
+//		//		return 0;
+//			}else{
+//				sprintf(buf1, "GoGoGo..."	);
+//			}
+//
+//	// MotorA & MotorB speed difference fix
+//	float headingError = totalDistanceA - totalDistanceB;
+//	const float Kp_heading = 150.0f;
+//	const float Ki_heading = 20.0f;
+//	const float Kd_heading = 10.0f;
+//
+//	headingIntegral += headingError;
+//	if(headingIntegral > 100) headingIntegral = 100;
+//	if(headingIntegral < -100) headingIntegral = -100;
+//
+//	float headingDerivative = headingError - prevHeadingError;
+//	prevHeadingError = headingError;
+//	float headingCorrection = Kp_heading * headingError + Ki_heading * headingIntegral + Kd_heading * headingDerivative;
+//
+//	speedA -= headingCorrection;
+//	speedB += headingCorrection;
+//
+//	if (speedA > 7199) speedA = 7199;
+//	if (speedA < 0) speedA = 0;
+//	if (speedB > 7199) speedB = 7199;
+//	if (speedB < 0) speedB = 0;
+//
+////	sprintf(buf1, "fwd targetV: %d", pidA.target_speed);
+////	sprintf(buf2, "pwmA: %d", speedA);
+////	sprintf(buf3, "pwmB: %d", speedB);
+////	sprintf(buf2, "TargetD: %.1fcm", targetDistance);
+////	sprintf(buf3, "ActualA: %.1fcm", totalDistanceA);
+////	sprintf(buf4, "ActualB: %.1fcm", totalDistanceB);
+////	sprintf(buf3, "EncA: %d", currentEncoderA);
+////	sprintf(buf4, "EncB: %d", currentEncoderB);
+//
+////	motorForwardA(cmd.param1Speed);
+////	motorForwardB(cmd.param1Speed);
+//
+////  PID output
+//	motorReverseA(speedA);
+//	motorReverseB(speedB);
+//
+//	sprintf(buf2, "TargetD: %.1f", targetDistance);
+//	sprintf(buf3, "ActualA: %.1f", totalDistanceA);
+//	sprintf(buf4, "HeadC: %.1f", headingCorrection);
+//
+//	return 0;
+//}
+
+void setServoAngle(int pwm) {
+    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, pwm);
+}
+
+uint8_t motorTurn(MotorCommand_t cmd, uint8_t isStateChanged) {
+	static float startTurnHeading = 0.0f; // Stores the absolute heading at the start of the turn
+	static float targetTurnAngle = 0.0f; // The magnitude of the turn (e.g., 90 degrees)
+
+	if(isStateChanged) {
+		// Set servo direction based on command
+		if(cmd.command == TURNL) setServoAngle(SERVO_LEFT_MAX);
+		if(cmd.command == TURNR) setServoAngle(SERVO_RIGHT_MAX);
+
+		startTurnHeading = currentAngle; // Capture the absolute heading from the IMU
+		targetTurnAngle = cmd.param2DistAngle; // The desired magnitude of the turn
+
+		isTurning = 1; // Flag to indicate a turn is in progress
+		isFrontCalib = 0;
+		lastAngleUpdateTime = HAL_GetTick(); // Reset time for potential future delta time calculations
+		osDelay(100); // Small delay to allow servo to reach position
+	}
+
+	// Calculate the angle turned relative to the start of this command
+	float angleTurned = currentAngle - startTurnHeading;
+
+	// Normalize angleTurned to be within -180 to 180 degrees to handle wrap-around
+	// e.g., if startTurnHeading=350 and currentAngle=10, angleTurned should be 20 degrees, not -340.
+	if (angleTurned > 180.0f) angleTurned -= 360.0f;
+	else if (angleTurned < -180.0f) angleTurned += 360.0f;
+
+	// Determine if the target angle has been reached
+	uint8_t turnCompleted = 0;
+	if (cmd.command == TURNR) { // Turning Right (positive angle)
+		if (angleTurned >= targetTurnAngle) {
+			turnCompleted = 1;
+		}
+	} else if (cmd.command == TURNL) { // Turning Left (negative angle, or positive if targetTurnAngle is also positive)
+		// If targetTurnAngle is always given as a positive magnitude (e.g., 90 for left or right)
+		// then we compare against negative angle for left turn
+		if (angleTurned <= -targetTurnAngle) {
+			turnCompleted = 1;
+		}
+	}
+
+	if(turnCompleted) {
+		motorStop();
+		isTurning = 0;
+		setServoAngle(SERVO_CENTER); // Return servo to center
+		sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+		sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+		sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+		sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+		return 1; // Turn completed
+	}
+
+	// Speed adjustment (deceleration logic) as robot approaches target angle
+	int turnSpeed = cmd.param1Speed;
+	float angleRemaining = targetTurnAngle - fabs(angleTurned);
+
+	if(angleRemaining < 10.0f){
+		if(turnSpeed>1000){
+			turnSpeed = 1000;
+		}
+	}else if(angleRemaining < 30.0f){
+		if(turnSpeed>2000){
+			turnSpeed = 2000;
+		}
+	}else if(angleRemaining < 45.0f){
+		if(turnSpeed>4000){
+			turnSpeed = 4000;
+		}
+	}else if(angleRemaining < 60.0f){
+		if(turnSpeed>5000){
+			turnSpeed = 5000;
+		}
+	}
+
+	// Apply motor speeds
+	if(cmd.command == TURNR) {
+		motorForwardA(turnSpeed); // Left wheel forward (confirmed by user for right turn)
+		motorStopB();             // Right wheel stopped
+	}
+	if(cmd.command == TURNL) {
+		motorForwardB(turnSpeed); // Right wheel forward
+		motorStopA();             // Left wheel stopped
+	}
+
+    sprintf((char*)buf1,"Tgt: %.1f deg\n", targetTurnAngle);
+	HAL_UART_Transmit(&huart3,buf1,strlen(buf1),0xFFFF);
+	sprintf((char*)buf2,"Actual:%.1f deg\n", angleTurned);
+	HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+	sprintf((char*)buf3,"StartH:%.1f\n", startTurnHeading);
+	HAL_UART_Transmit(&huart3,buf3,strlen(buf3),0xFFFF);
+	sprintf((char*)buf4,"CurrentH:%.1f\n", currentAngle);
+	HAL_UART_Transmit(&huart3,buf4,strlen(buf4),0xFFFF);
+
+	return 0; // Turn in progress
+}
+
+uint8_t motorTurnF(MotorCommandF_t cmd, uint8_t isStateChanged) {
+    static float startTurnHeading = 0.0f; // Stores the absolute heading at the start of the turn
+    static float targetTurnAngle = 0.0f; // The magnitude of the turn (e.g., 90 degrees)
+
+    if(isStateChanged) {
+        // Set servo direction based on command
+    	if(cmd.command == TURNL) setServoAngle(SERVO_LEFT_MAX);
+    	if(cmd.command == TURNR) setServoAngle(SERVO_RIGHT_MAX);
+
+        startTurnHeading = currentAngle; // Capture the absolute heading from the IMU
+        targetTurnAngle = cmd.param2DistAngle; // The desired magnitude of the turn
+
+        isTurning = 1; // Flag to indicate a turn is in progress
+        isFrontCalib = 0;
+        lastAngleUpdateTime = HAL_GetTick(); // Reset time for potential future delta time calculations
+        osDelay(100); // Small delay to allow servo to reach position
+    }
+
+    // Calculate the angle turned relative to the start of this command
+    float angleTurned = currentAngle - startTurnHeading;
+    // Normalize angleTurned to be within -180 to 180 degrees to handle wrap-around
+    // e.g., if startTurnHeading=350 and currentAngle=10, angleTurned should be 20 degrees, not -340.
+    if (angleTurned > 180.0f) angleTurned -= 360.0f;
+    else if (angleTurned < -180.0f) angleTurned += 360.0f;
+
+    // Determine if the target angle has been reached
+    uint8_t turnCompleted = 0;
+    if (cmd.command == TURNR) { // Turning Right (positive angle)
+        if (angleTurned >= targetTurnAngle) {
+            turnCompleted = 1;
+        }
+    } else if (cmd.command == TURNL) { // Turning Left (negative angle, or positive if targetTurnAngle is also positive)
+        // If targetTurnAngle is always given as a positive magnitude (e.g., 90 for left or right)
+        // then we compare against negative angle for left turn
+        if (angleTurned <= -targetTurnAngle) {
+            turnCompleted = 1;
+        }
+    }
+
+    if(turnCompleted) {
+        motorStop();
+        isTurning = 0;
+        setServoAngle(SERVO_CENTER); // Return servo to center
+        sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+        sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+        sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+        sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+        return 1; // Turn completed
+    }
+
+    // Speed adjustment (deceleration logic) as robot approaches target angle
+    int turnSpeed = cmd.param1Speed;
+    float angleRemaining = targetTurnAngle - fabs(angleTurned);
+
+    if(angleRemaining < 10.0f){
+    	if(turnSpeed>1000){
+    		turnSpeed = 1000;
+    	}
+    }else if(angleRemaining < 30.0f){
+    	if(turnSpeed>2000){
+    		turnSpeed = 2000;
+    	}
+    }else if(angleRemaining < 45.0f){
+    	if(turnSpeed>4000){
+    		turnSpeed = 4000;
+    	}
+    }else if(angleRemaining < 60.0f){
+    	if(turnSpeed>5000){
+    		turnSpeed = 5000;
+    	}
+    }
+
+    // Apply motor speeds
+    if(cmd.command == TURNR) {
+    	motorForwardA(turnSpeed); // Left wheel forward (confirmed by user for right turn)
+    	motorStopB();             // Right wheel stopped
+    }
+    if(cmd.command == TURNL) {
+    	motorForwardB(turnSpeed); // Right wheel forward
+    	motorStopA();             // Left wheel stopped
+    }
+
+    sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+    HAL_UART_Transmit(&huart3,buf1,strlen(buf1),0xFFFF);
+    sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+    HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+    sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+    HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+    sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+    HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+
+    return 0; // Turn in progress
+}
+
+uint8_t motorTurnF1(MotorCommandF_t cmd, uint8_t isStateChanged) {
+	static float startTurnHeading = 0.0f; // Stores the absolute heading at the start of the turn
+	static float targetTurnAngle = 0.0f; // The magnitude of the turn (e.g., 90 degrees)
+
+	if(isStateChanged) {
+		// Set servo direction based on command
+		if(cmd.command == TURNL) setServoAngle(SERVO_LEFT_MAX);
+		if(cmd.command == TURNR) setServoAngle(SERVO_RIGHT_MAX);
+
+		startTurnHeading = currentAngle; // Capture the absolute heading from the IMU
+		targetTurnAngle = cmd.param2DistAngle; // The desired magnitude of the turn
+
+		isTurning = 1; // Flag to indicate a turn is in progress
+		isFrontCalib = 0;
+		lastAngleUpdateTime = HAL_GetTick(); // Reset time for potential future delta time calculations
+		osDelay(100); // Small delay to allow servo to reach position
+	}
+
+	// Calculate the angle turned relative to the start of this command
+	float angleTurned = currentAngle - startTurnHeading;
+
+	// Normalize angleTurned to be within -180 to 180 degrees to handle wrap-around
+	// e.g., if startTurnHeading=350 and currentAngle=10, angleTurned should be 20 degrees, not -340.
+	if (angleTurned > 180.0f) angleTurned -= 360.0f;
+	else if (angleTurned < -180.0f) angleTurned += 360.0f;
+
+	// Determine if the target angle has been reached
+	uint8_t turnCompleted = 0;
+	if (cmd.command == TURNR) { // Turning Right (positive angle)
+		if (angleTurned >= targetTurnAngle) {
+			turnCompleted = 1;
+		}
+	} else if (cmd.command == TURNL) { // Turning Left (negative angle, or positive if targetTurnAngle is also positive)
+		// If targetTurnAngle is always given as a positive magnitude (e.g., 90 for left or right)
+		// then we compare against negative angle for left turn
+		if (angleTurned <= -targetTurnAngle) {
+			turnCompleted = 1;
+		}
+	}
+
+	if(turnCompleted) {
+		motorStop();
+		isTurning = 0;
+		setServoAngle(SERVO_CENTER); // Return servo to center
+		sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+		sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+		sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+		sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+		return 1; // Turn completed
+	}
+
+	// Speed adjustment (deceleration logic) as robot approaches target angle
+	int turnSpeed = cmd.param1Speed;
+	float angleRemaining = targetTurnAngle - fabs(angleTurned);
+
+	if(angleRemaining < 10.0f){
+		if(turnSpeed>1000){
+			turnSpeed = 1000;
+		}
+	}else if(angleRemaining < 30.0f){
+		if(turnSpeed>2000){
+			turnSpeed = 2000;
+		}
+	}else if(angleRemaining < 45.0f){
+		if(turnSpeed>4000){
+			turnSpeed = 4000;
+		}
+	}else if(angleRemaining < 60.0f){
+		if(turnSpeed>5000){
+			turnSpeed = 5000;
+		}
+	}
+
+	// Apply motor speeds
+	if(cmd.command == TURNR) {
+		motorForwardA(turnSpeed); // Left wheel forward (confirmed by user for right turn)
+		motorStopB();             // Right wheel stopped
+	}
+	if(cmd.command == TURNL) {
+		motorForwardB(turnSpeed); // Right wheel forward
+		motorStopA();             // Left wheel stopped
+	}
+
+	sprintf((char*)buf1,"Tgt: %.1f deg", targetTurnAngle);
+	sprintf((char*)buf2,"Actual:%.1f deg", angleTurned);
+	sprintf((char*)buf3,"StartH:%.1f", startTurnHeading);
+	sprintf((char*)buf4,"CurrentH:%.1f", currentAngle);
+
+	return 0; // Turn in progress
+}
+
+uint8_t motorTurnPwmL(MotorCommand_t cmd, uint8_t isStateChanged) {
+    if(isStateChanged) {
+        // Reset
+    	setServoAngle(cmd.param1Speed);
+        currentAngle = 0.0f;
+        targetAngle = cmd.param2DistAngle; // Target angle
+        isTurning = 1;
+        isFrontCalib = 0;
+        lastAngleUpdateTime = HAL_GetTick();
+        osDelay(200);
+    }
+
+//    OLED_ShowString(10, 20, rxBuffer);
+//    OLED_ShowString(10, 30, rxBuffer);
+
+    int turnSpeed = 7199;
+    float remaining = fabs(targetAngle) - fabs(currentAngle);
+
+    if(remaining < 0.0f) {
+        motorStop();
+        isTurning = 0;
+        setServoAngle(SERVO_CENTER);
+        sprintf(buf1,"Target:  %.3f", targetAngle);
+        sprintf(buf2,"Current: %.3f", currentAngle);
+//        sprintf(buf3,"Remain: %.3f", remaining);
+        return 1;
+    }else if(remaining < 10.0f){
+    	if(turnSpeed>1000){
+    		turnSpeed = 1000;
+    	}
+    }else if(remaining < 30.0f){
+    	if(turnSpeed>2000){
+    		turnSpeed = 2000;
+    	}
+    }else if(remaining < 45.0f){
+    	if(turnSpeed>4000){
+    		turnSpeed = 4000;
+    	}
+    }else if(remaining < 60.0f){
+    	if(turnSpeed>5000){
+    		turnSpeed = 5000;
+    	}
+    }
+
+    sprintf(buf1,"Target:  %.3f", targetAngle);
+    sprintf(buf2,"Current: %.3f", currentAngle);
+//    sprintf(buf3,"Remain: %.3f", remaining);
+
+    motorForwardB(turnSpeed);
+    motorStopA();
+
+    return 0;
+}
+
+uint8_t motorTurnPwmR(MotorCommand_t cmd, uint8_t isStateChanged) {
+    if(isStateChanged) {
+        // Reset
+    	setServoAngle(cmd.param1Speed);
+        currentAngle = 0.0f;
+        targetAngle = cmd.param2DistAngle; // Target angle
+        isTurning = 1;
+        isFrontCalib = 0;
+        lastAngleUpdateTime = HAL_GetTick();
+        osDelay(200);
+    }
+
+//    OLED_ShowString(10, 20, rxBuffer);
+//    OLED_ShowString(10, 30, rxBuffer);
+
+    int turnSpeed = 7199;
+    float remaining = fabs(targetAngle) - fabs(currentAngle);
+
+    if(remaining < 0.0f) {
+        motorStop();
+        isTurning = 0;
+        setServoAngle(SERVO_CENTER);
+        sprintf(buf1,"Target:  %.3f", targetAngle);
+        sprintf(buf2,"Current: %.3f", currentAngle);
+//        sprintf(buf3,"Remain: %.3f", remaining);
+        return 1;
+    }else if(remaining < 10.0f){
+    	if(turnSpeed>1000){
+    		turnSpeed = 1000;
+    	}
+    }else if(remaining < 30.0f){
+    	if(turnSpeed>2000){
+    		turnSpeed = 2000;
+    	}
+    }else if(remaining < 45.0f){
+    	if(turnSpeed>4000){
+    		turnSpeed = 4000;
+    	}
+    }else if(remaining < 60.0f){
+    	if(turnSpeed>5000){
+    		turnSpeed = 5000;
+    	}
+    }
+
+    sprintf(buf1,"Target:  %.3f", targetAngle);
+    sprintf(buf2,"Current: %.3f", currentAngle);
+//    sprintf(buf3,"Remain: %.3f", remaining);
+
+    motorForwardA(turnSpeed);
+    motorStopB();
+
+    return 0;
+}
+
+
+uint8_t motorTurn90R(MotorCommand_t cmd, uint8_t isStateChanged) {
+    static enum {BACKWARD_PRE, TURNING, BACKWARD_POST, COMPLETED} turnState = BACKWARD_PRE;
+    static MotorCommandF_t subCmd;
+    static uint8_t subStateChanged = 0;
+
+    if(isStateChanged) {
+        turnState = BACKWARD_PRE;
+        subStateChanged = 1;  // 初始化标记
+    }
+
+    switch(turnState) {
+        case BACKWARD_PRE:
+            if(subStateChanged) {
+                subCmd.command = REV;
+                subCmd.param1Speed = 3500;
+                subCmd.param2DistAngle = 2.5f;
+            }
+
+            // pid后退1cm
+            if(motorPidReverseF(subCmd, subStateChanged)) {
+                turnState = TURNING;
+                subStateChanged = 1;  // FSM +1, Init
+                osDelay(100);
+            } else {
+                subStateChanged = 0;
+            }
+            break;
+
+        case TURNING:
+            if(subStateChanged) {
+                subCmd.command = TURNR;
+                subCmd.param1Speed = 3550;
+                subCmd.param2DistAngle = 88.5f;
+            }
+            if(motorTurnF(subCmd, subStateChanged)) {
+                turnState = BACKWARD_POST;
+                osDelay(200);
+                subStateChanged = 1;
+            } else {
+                subStateChanged = 0;
+            }
+            break;
+
+        case BACKWARD_POST:
+            if(subStateChanged) {
+                subCmd.command = REV;
+                subCmd.param1Speed = 3550;
+                subCmd.param2DistAngle = 7.0f;
+            }
+
+            if(motorPidReverseF(subCmd, subStateChanged)) {
+                turnState = COMPLETED;
+            } else {
+                subStateChanged = 0;
+            }
+            break;
+
+        case COMPLETED:
+            motorStop();
+            sprintf(buf1, "R90 Complete");
+            turnState = BACKWARD_PRE;
+            return 1;
+    }
+
+    return 0;
+}
+
+uint8_t motorTurn90L(MotorCommand_t cmd, uint8_t isStateChanged) {
+    static enum {FORWARD_PRE, TURNING, BACKWARD_POST, COMPLETED} turnState = FORWARD_PRE;
+    static MotorCommandF_t subCmd;
+    static uint8_t subStateChanged = 0;
+
+    if(isStateChanged) {
+        turnState = FORWARD_PRE;
+        subStateChanged = 1;  // Full initialization needed
+    }
+
+    switch(turnState) {
+        case FORWARD_PRE:
+            if(subStateChanged) {
+                subCmd.command = REV;
+                subCmd.param1Speed = 3550;
+                subCmd.param2DistAngle = 2.0f;
+            }
+
+            if(motorPidReverseF(subCmd, subStateChanged)) {
+                turnState = TURNING;
+                subStateChanged = 1;  // Substate initialization needed
+                osDelay(100);
+            } else {
+                subStateChanged = 0;
+            }
+            break;
+
+        case TURNING:
+            if(subStateChanged) {
+                subCmd.command = TURNL;
+                subCmd.param1Speed = 3550;
+                subCmd.param2DistAngle = 87.1f;
+            }
+            if(motorTurnF(subCmd, subStateChanged)) {
+                turnState = BACKWARD_POST;
+                osDelay(200);
+                subStateChanged = 1;
+            } else {
+                subStateChanged = 0;
+            }
+            break;
+
+        case BACKWARD_POST:
+            if(subStateChanged) {
+                subCmd.command = FWD;
+                subCmd.param1Speed = 3550;
+                subCmd.param2DistAngle = 1.5f;
+            }
+
+            if(motorPidForwardF(subCmd, subStateChanged)) {
+                turnState = COMPLETED;
+            } else {
+                subStateChanged = 0;
+            }
+            break;
+
+        case COMPLETED:
+            motorStop();
+            sprintf(buf1, "R90 Complete");
+            turnState = FORWARD_PRE;
+            return 1;
+    }
+
+    return 0;
+}
+
+uint8_t task2Loop(MotorCommand_t cmd, uint8_t isStateChanged){
+
+	static MotorCommandF_t subCmd;
+	subCmd.cmdId = 0;
+	static uint8_t subStateChanged = 0;
+	static uint8_t obs1TurnStateChanged = 0;
+	static uint8_t obs1TurnPhase = 0;
+    static uint8_t parkingSubState = 0;
+    static uint8_t parkingStateChanged = 0;
+    static uint8_t followSubState = 0;
+    static uint8_t followStateChanged = 0;
+    static uint8_t obs2ReturnPhase = 0;
+    static uint8_t obs2ReturnSubChanged = 0;
+    static float obs2ReturnDistance = 0.0f;
+	static float turn_angle_rad;
+	static float turn_angle_deg;
+
+	    if(isStateChanged) {
+	    	task2State = OBS1FORWARD;
+//	    	task2State = OBS2FOLLOW; // for testing only
+	        subStateChanged = 1;
+	    }
+
+	    switch(task2State) {
+	    case OBS1FORWARD:
+	    	sprintf(buf, "OBS1FORWARD\0");
+	    	if(subStateChanged) {
+				x += getFilteredUltrasonicDist();
+	    		subCmd.command = FWD;
+	    		subCmd.param1Speed = 5000;
+	    		subCmd.param2DistAngle = 350; // Stop 30cm from the obstacle 1
+	    	}
+	    	if(motorPidForwardTask2Until(subCmd, subStateChanged)) {
+	    		task2State = OBS1CAPTURE;
+	    		subStateChanged = 1;
+	    		osDelay(100);
+	    	}else{
+	    		subStateChanged = 0;
+	    	}
+	    	break;
+	    case OBS1CAPTURE:
+	    	sprintf(buf, "OBS1CAPTURE\0");
+	    	if(subStateChanged){
+	    		subStateChanged = 0;
+	    		if(capture1 == 0) {
+	    			HAL_UART_Transmit(&huart3,(uint8_t *)capture1Req,strlen(capture1Req),0xFFFF);
+	    		}
+	    		osDelay(50);
+	    	}
+	    	switch(capture1){
+	    	case 0:
+	    	default:
+	    		osDelay(100);
+	    		break;
+	    	case 1:
+	    	case 2:
+	    		task2State = OBS1TURN;
+	    		subStateChanged = 1;
+	    		break;
+	    	}
+	    	break;
+	    case OBS1TURN:
+	    {
+	    	sprintf(buf, "OBS1TURN\0");
+	    	if(subStateChanged){
+	    		obs1TurnPhase = 0;
+	    		obs1TurnStateChanged = 1;
+	    		subStateChanged = 0;
+	    	}
+	        // initialize the current step's command when we enter a new phase
+	        if (obs1TurnStateChanged)
+	        {
+	        	if (capture1 == 1){
+					switch (obs1TurnPhase)
+					{
+						case 0: // 45° LEFT
+							subCmd.command       = TURNL;
+							subCmd.param1Speed   = 3550;    // turning speed (your example uses fixed speed)
+							subCmd.param2DistAngle = 45.0f; // degrees
+							break;
+						case 1: // 45° RIGHT
+							subCmd.command       = TURNR;
+							subCmd.param1Speed   = 3550;
+							subCmd.param2DistAngle = 45.0f;
+							break;
+						case 2: // FORWARD 10 cm
+							subCmd.command       = FWD;
+							subCmd.param1Speed   = 5000;    // forward speed (same as your forward example)
+							subCmd.param2DistAngle = 15.0f; // 15 cm
+							break;
+						case 3: // 45° RIGHT
+							subCmd.command       = TURNR;
+							subCmd.param1Speed   = 3550;
+							subCmd.param2DistAngle = 45.0f;
+							break;
+						case 4: // 45° LEFT
+							subCmd.command       = TURNL;
+							subCmd.param1Speed   = 3550;
+							subCmd.param2DistAngle = 40.0f;
+							break;
+						default:
+							break;
+					}
+	        	}else if(capture1 == 2) {
+	        		switch(obs1TurnPhase){
+	        			case 0: // 45° RIGHT
+	        				subCmd.command       = TURNR;
+	        				subCmd.param1Speed   = 3550;    // turning speed (your example uses fixed speed)
+	        				subCmd.param2DistAngle = 49.0f; // degrees
+	        				break;
+	        			case 1: // 45° LEFT
+	        				subCmd.command       = TURNL;
+	        				subCmd.param1Speed   = 3550;
+	        				subCmd.param2DistAngle = 45.0f;
+	        				break;
+	        			case 2: // FORWARD 10 cm
+	        				subCmd.command       = FWD;
+	        				subCmd.param1Speed   = 5000;    // forward speed (same as your forward example)
+	        				subCmd.param2DistAngle = 15.0f; // 15 cm
+	        				break;
+	        			case 3: // 45° LEFT
+	        				subCmd.command       = TURNL;
+	        				subCmd.param1Speed   = 3550;
+	        				subCmd.param2DistAngle = 45.0f;
+	        				break;
+	        			case 4: // 45° RIGHT
+	        				subCmd.command       = TURNR;
+	        				subCmd.param1Speed   = 3550;
+	        				subCmd.param2DistAngle = 45.0f;
+	        				break;
+	        			default:
+	        				break;
+	        		}
+	        	}
+	        }
+	        // execute the current step and advance when done
+	        switch (obs1TurnPhase)
+	        {
+	            case 0: // First two 45 degree turns
+	            {
+	            	                if (motorTurnF1(subCmd, obs1TurnStateChanged))
+	            	                {
+	            	                    obs1TurnPhase++;
+	            	                    obs1TurnStateChanged = 1;
+	            	                    osDelay(100);
+	            	                }
+	            	                else
+	            	                {
+	            	                	obs1TurnStateChanged = 0;
+	            	                }
+	            	            } break;
+	            case 1:
+	            {
+	                if (motorTurnF1(subCmd, obs1TurnStateChanged))
+	                {
+	                    obs1TurnPhase++;
+	                    obs1TurnStateChanged = 1;
+	                    setServoAngle(SERVO_CENTER);
+	                    osDelay(40); // Got osDelay(10) in motorPidForwardF
+	                }
+	                else
+	                {
+	                	obs1TurnStateChanged = 0;
+	                }
+	            } break;
+	            case 2: // FWD 10 cm
+	            {
+	            	if(obs1TurnStateChanged){
+	            		x += getFilteredUltrasonicDist();
+	            	}
+	                // 'x' is whatever sensor/arg you already pass in your forward helper
+	                if (motorPidForwardF(subCmd, obs1TurnStateChanged))
+	                {
+	                    obs1TurnPhase++;
+	                    obs1TurnStateChanged = 1;
+	                    osDelay(10);
+	                }
+	                else
+	                {
+	                	obs1TurnStateChanged = 0;
+	                }
+	            } break;
+	            case 3: // L45
+	            {
+	                if (motorTurnF(subCmd, obs1TurnStateChanged))
+	                {
+	                    obs1TurnPhase++;
+	                    obs1TurnStateChanged = 1;
+	                    osDelay(10);
+	                }
+	                else
+	                {
+	                	obs1TurnStateChanged = 0;
+	                }
+	            } break;
+	            case 4: // R45 (final step)
+	            {
+	                if (motorTurnF(subCmd, obs1TurnStateChanged))
+	                {
+	                    // sequence complete -> move on
+	                    obs1TurnPhase   = 0;   // reset for next time we enter OBS1TURN
+	                    obs1TurnStateChanged = 1;
+	                    subStateChanged = 1;
+	                    task2State = OBS2FORWARD;
+	                    osDelay(100);
+	                }
+	                else
+	                {
+	                	obs1TurnStateChanged = 0;
+	                }
+	            } break;
+	            default:
+	                // safety: if something goes odd, reset phase
+	                obs1TurnPhase = 0;
+	                subStateChanged = 1;
+	                break;
+	        	}
+	    	}
+	    	break;
+	    case OBS2FORWARD:
+	    	sprintf(buf, "OBS2FORWARD\0");
+	    	if(subStateChanged) {
+	    		subCmd.param1Speed = 5000;
+	    		subCmd.param2DistAngle = 250; // Stop 30cm from the obstacle 2
+	    	}
+	    	if(motorPidForwardBackwardsUntil(subCmd, subStateChanged)) { // TODO: Might need backward as well
+	    		task2State = OBS2CAPTURE;
+//	    		task2State = TASK2DONE; // for testing only
+	    		subStateChanged = 1;
+	    		osDelay(100);
+	    	}else{
+	    		subStateChanged = 0;
+	    	}
+	    	break;
+	    case OBS2CAPTURE:
+	    	sprintf(buf, "OBS2CAPTURE\0");
+	    	if(subStateChanged){
+	    		subStateChanged = 0;
+	    		const uint8_t result[11] = "!CAPTURE2;\0";
+	    		if(capture2 == 0) {
+	    			HAL_UART_Transmit(&huart3,(uint8_t *)capture2Req,strlen(capture2Req),0xFFFF);
+	    		}
+	    	}
+	    	switch(capture2){
+	    	case 0:
+	    	default:
+	    		osDelay(100);
+	    		break;
+	    	case 1:
+	    	case 2:
+	    		task2State = OBS2TURN1;
+	    		subStateChanged = 1;
+	    		osDelay(100);
+	    		break;
+	    	}
+	    	break;
+	    case OBS2TURN1:
+	    	sprintf(buf, "OBS2TURN1\0");
+	    	if(subStateChanged){
+	    		if(capture2 == 1){ // left turn
+	    			subCmd.command = TURNL;
+	    			subCmd.param1Speed = 3550;
+	    			subCmd.param2DistAngle = 90.0f;
+	    		}else if(capture2 == 2){ //right turn
+	    			subCmd.command = TURNR;
+	    			subCmd.param1Speed = 3550;
+	    			subCmd.param2DistAngle = 90.0f;
+	    		}
+	    	}
+	    	if(motorTurnF(subCmd, subStateChanged)) {
+	    		task2State = OBS2FOLLOW;
+	    	    osDelay(50);
+	    	    subStateChanged = 1;
+	    	} else {
+	    	    subStateChanged = 0;
+	    	}
+	    	break;
+	    case OBS2FOLLOW:
+		// from kiefer
+	    {
+//	    	capture2 = 2;
+	    	if(subStateChanged){
+	    		subStateChanged = 0;
+	    		followSubState = 0;
+	    		followStateChanged = 1;
+	    	}
+	    	if (followStateChanged){
+	    		switch (followSubState){
+	    		case 0:
+	    		case 3:
+	    		{
+	                subCmd.command = FWD;
+	                subCmd.param1Speed = 3000;
+	                subCmd.param2DistAngle = 1000;
+	    			break;
+	    		}
+	    		case 1:{
+	    			if(capture2 == 1){ // left turn
+	    				subCmd.command = TURNR;
+	    				subCmd.param1Speed = 3550;
+	    				subCmd.param2DistAngle = 180.0f;
+	    			}else if(capture2 == 2){ //right turn
+	    				subCmd.command = TURNL;
+	    				subCmd.param1Speed = 3550;
+	    				subCmd.param2DistAngle = 180.0f;
+	    			}
+	    			break;
+	    		}
+	    		case 2:
+		    		{
+		                subCmd.command = FWD;
+		                subCmd.param1Speed = 3000;
+		                subCmd.param2DistAngle = 20;
+		    			break;
+		    		}
+
+	    		}
+	    	}
+
+	    	switch (followSubState){
+	    	case 0:{ // Follow initial
+		    	if (capture2 == 1){
+					if(motorPidForwardTask2UntilSensor(subCmd, followStateChanged, &rightNow, &placeholder)) {
+						// Move to next state
+						followSubState = 1;
+						followStateChanged = 1;
+						osDelay(100);
+					} else {
+						followStateChanged = 0;
+					}
+		    	}
+		    	else if (capture2 == 2){
+					if(motorPidForwardTask2UntilSensor(subCmd, followStateChanged, &leftNow, &placeholder)) {
+						// Move to next state
+						followSubState = 1;
+						followStateChanged = 1;
+						osDelay(100);
+					} else {
+						followStateChanged = 0;
+					}
+		    	}
+	    		break;
+	    	}
+	    	case 1:{ // Turn
+		    	if(motorTurnF1(subCmd, followStateChanged)) {
+		    		followSubState = 2;
+		    	    followStateChanged = 1;
+		    	    setServoAngle(SERVO_CENTER);
+		    	    osDelay(40);
+		    	} else {
+		    		followStateChanged = 0;
+		    	}
+	    		break;
+	    	}
+	    	case 2:{
+				if(motorPidForwardF(subCmd, followStateChanged)) {
+					y += 20;
+					followSubState = 3;
+					followStateChanged = 1;
+					osDelay(100);
+				} else {
+					followStateChanged = 0;
+				}
+				break;
+	    	}
+	    	case 3:{ // Follow back
+		    	if (capture2 == 1){
+					if(motorPidForwardTask2UntilSensor(subCmd, followStateChanged, &rightNow, &y)) {
+						task2State = OBS2TURN2;
+						followStateChanged = 1;
+						followSubState = 1;
+						subStateChanged = 1;
+						osDelay(100);
+					} else {
+						followStateChanged = 0;
+					}
+		    	}
+		    	else if (capture2 == 2){
+					if(motorPidForwardTask2UntilSensor(subCmd, followStateChanged, &leftNow, &y)) {
+						task2State = OBS2TURN2;
+						followStateChanged = 1;
+						followSubState = 1;
+						subStateChanged = 1;
+						osDelay(100);
+					} else {
+						followStateChanged = 0;
+					}
+		    	}
+	    		break;
+	    	}
+	    	}
+	    	break;
+	    }
+	    case OBS2TURN2:
+	    	sprintf(buf, "OBS2TURN2\0");
+//	    	capture2 = 2;
+	    	if (subStateChanged){
+	    		if(capture2 == 1){ // left turn
+	    			subCmd.command = TURNR;
+	    			subCmd.param1Speed = 3550;
+	    			subCmd.param2DistAngle = 90.0f;
+	    		}else if(capture2 == 2){ //right turn
+	    			subCmd.command = TURNL;
+	    			subCmd.param1Speed = 3550;
+	    			subCmd.param2DistAngle = 90.0f;
+	    		}
+	    	}
+	    	if(motorTurnF(subCmd, subStateChanged)) {
+	    		task2State = OBS2RETURN;
+	    	    osDelay(200);
+	    	    subStateChanged = 1;
+	    	} else {
+	    	    subStateChanged = 0;
+	    	}
+	    	break;
+	    case OBS2RETURN:
+	    	sprintf(buf, "OBS2RETURN\0");
+//	    	capture2 = 2;
+	        // Initialize when entering OBS2RETURN
+	        if(subStateChanged) {
+	            obs2ReturnPhase = 0;
+	            obs2ReturnSubChanged = 1;
+	            subStateChanged = 0;
+	        }
+
+	        // Initialize command for current phase
+	        if(obs2ReturnSubChanged) {
+	            switch(obs2ReturnPhase) {
+	                case 0: { // TURN phase
+	                    // Calculate current position
+	                    float current_x = x/10.0f - 2.0f;
+	                    float current_y = y/10.0f; // changed y/2.0f to y/10.0f, and removed +12.0f and -12.0f from if/else for capture2==1/2.
+	                    // Assuming that the coordinates are in cm, y was previously in mm.
+
+	                    // Calculate displacement to target (30, 20)
+	                    float delta_x = 30.0f - current_x;
+	                    float delta_y = 20.0f - current_y;
+
+	                    // Store distance for forward phase
+	                    obs2ReturnDistance = sqrtf(delta_x * delta_x + delta_y * delta_y);
+
+	                    // Calculate turn angle
+	                    // Robot is facing WEST, we need angle to turn toward target
+	                    turn_angle_rad = atan2f(fabs(delta_y), fabs(delta_x));
+	                    turn_angle_deg = turn_angle_rad * 180.0f / M_PI;
+
+	                    // Determine turn direction based on path
+	                    if(fabs(turn_angle_deg) > 2.0f) {
+	                        if(capture2 == 1) {
+	                            // Top path: delta_y should be negative, turn RIGHT
+	                            subCmd.command = TURNR;
+	                            subCmd.param2DistAngle = turn_angle_deg;
+	                        } else {
+	                            // Bottom path: delta_y should be positive, turn LEFT
+	                            subCmd.command = TURNL;
+	                            subCmd.param2DistAngle = turn_angle_deg;
+	                        }
+	                        subCmd.param1Speed = 3550;
+
+	                        // Debug output
+	                        sprintf(buf1, "Path:%d Turn:%.1f", capture2, turn_angle_deg);
+	                        sprintf(buf2, "Dist:%.1fcm", obs2ReturnDistance);
+	                    } else {
+	                        // Angle too small, skip to forward
+	                        obs2ReturnPhase = 1;
+	                        obs2ReturnSubChanged = 1;
+	                    }
+	                    break;
+	                }
+
+	                case 1: { // FORWARD phase
+	                    subCmd.command = FWD;
+	                    subCmd.param1Speed = 5000;
+	                    subCmd.param2DistAngle = obs2ReturnDistance;
+	                    break;
+	                }
+	            }
+	        }
+
+	        // Execute current phase (same pattern as obs1TurnPhase)
+	        switch(obs2ReturnPhase) {
+	            case 0: { // Turn
+	                if(motorTurnF(subCmd, obs2ReturnSubChanged)) {
+	                    obs2ReturnPhase++;
+	                    obs2ReturnSubChanged = 1;
+	                    osDelay(100);
+	                } else {
+	                    obs2ReturnSubChanged = 0;
+	                }
+	                break;
+	            }
+
+	            case 1: { // Forward
+	                if(motorPidForwardF(subCmd, obs2ReturnSubChanged)) {
+	                    // Move to next state
+	                    task2State = PARKING;
+	                    subStateChanged = 1;
+	                    osDelay(100);
+	                } else {
+	                    obs2ReturnSubChanged = 0;
+	                }
+	                break;
+	            }
+	        }
+	        break;
+	        case PARKING: {
+	            // ---- state entry ----
+	            if (subStateChanged) {
+	                parkingSubState     = 0;
+	                parkingStateChanged = 1;   // first tick for substate 0
+	                subStateChanged     = 0;
+	            }
+
+	            // ---- build the command for the CURRENT substate (always) ----
+	            // capture2: 1 = left, 2 = right (assumed from your code/comments)
+	            switch (parkingSubState) {
+	                case 0: { // re-angle to 45° relative to current heading
+	                    if (capture2 == 1) {      // left turn path picked earlier
+	                        subCmd.command       = TURNR;           // (kept your original mapping)
+	                        subCmd.param1Speed   = 3550;
+	                        subCmd.param2DistAngle = 45.0f - turn_angle_deg;
+	                    } else {                  // capture2 == 2 → right turn
+	                        subCmd.command       = TURNL;
+	                        subCmd.param1Speed   = 3550;
+	                        subCmd.param2DistAngle = 45.0f - turn_angle_deg;
+	                    }
+	                    break;
+	                }
+	                case 1: { // forward phase towards carpark
+	                    subCmd.command         = FWD;
+	                    subCmd.param1Speed     = 5000;
+	                    subCmd.param2DistAngle = sqrtf(30.0f * 30.0f + 20.0f * 20.0f); // ≈ 36.06 units
+	                    break;
+	                }
+	                case 2: { // final re-angle to 45° into the lot
+	                    if (capture2 == 1) {      // left path
+	                        subCmd.command       = TURNL;
+	                        subCmd.param1Speed   = 3550;
+	                        subCmd.param2DistAngle = 45.0f;
+	                    } else {                  // right path
+	                        subCmd.command       = TURNR;
+	                        subCmd.param1Speed   = 3550;
+	                        subCmd.param2DistAngle = 45.0f;
+	                    }
+	                    break;
+	                }
+	                default:
+	                    // safety: reset if something goes off
+	                    parkingSubState = 0;
+	                    parkingStateChanged = 1;
+	                    break;
+	            }
+
+	            // ---- execute current substate + advance FSM ----
+	            switch (parkingSubState) {
+	                case 0: { // Turn back to 45° towards carpark
+	                    if (motorTurnF(subCmd, parkingStateChanged)) {
+	                        parkingSubState     = 1;
+	                        parkingStateChanged = 1;  // next substate's first tick
+	                        osDelay(200);
+	                    } else {
+	                        parkingStateChanged = 0;
+	                    }
+	                    break;
+	                }
+	                case 1: { // Move forward to carpark
+	                    if (motorPidForwardF(subCmd, parkingStateChanged)) {
+	                        parkingSubState     = 2;
+	                        parkingStateChanged = 1;
+	                        osDelay(100);
+	                    } else {
+	                        parkingStateChanged = 0;
+	                    }
+	                    break;
+	                }
+	                case 2: { // Final align
+	                    if (motorTurnF(subCmd, parkingStateChanged)) {
+	                        parkingSubState     = 0;     // ready for next cycle
+	                        task2State          = TASK2DONE;  // or whatever you signal on completion
+	                        parkingStateChanged = 1;
+	                        subStateChanged     = 1;     // leaving PARKING state
+	                        osDelay(200);
+	                    } else {
+	                        parkingStateChanged = 0;
+	                    }
+	                    break;
+	                }
+	            }
+	            break;
+	        }
+	    case TASK2DONE:
+	    	osDelay(500);
+	    	return 1;
+	    	break;
+	    }
+	    return 0;
+
+}
+
+float getFilteredUltrasonicDist(void) {
+	// Take multiple ultrasonic readings and filter outliers
+	float readings[10];
+	float last = 0.0f;
+	for(int i = 0; i < 10;) {
+		readings[i] = distance;
+		if (readings[i] != last){
+			last = readings[i];
+			i++;
+		}
+		osDelay(60);  // Small delay between readings
+	}
+	// Bubble sort
+	for(int i = 0; i < 9; i++) {
+		for(int j = 0; j < 9-i; j++) {
+			if(readings[j] > readings[j+1]) {
+				float temp = readings[j];
+				readings[j] = readings[j+1];
+				readings[j+1] = temp;
+			}
+		}
+	}
+	return (readings[3] + readings[4] + readings[5] + readings[6]) / 4.0f;
+}
+
+//uint8_t motorTurn(MotorCommand_t cmd, uint8_t isStateChanged) {
+//    // PID constants - tune these for your robot
+//    static const float Kp = 80.0f;
+//    static const float Ki = 0.5f;
+//    static const float Kd = 20.0f;
+//    static const float integralMax = 2000.0f;
+//
+//    // PID state variables
+//    static float integral = 0.0f;
+//    static float prevError = 0.0f;
+//
+//    if (isStateChanged) {
+//        // Reset PID controller
+//        integral = 0.0f;
+//        prevError = 0.0f;
+//
+//        // Set servo direction
+//        if (cmd.command == TURNL) setServoAngle(SERVO_LEFT_MAX);
+//        if (cmd.command == TURNR) setServoAngle(SERVO_RIGHT_MAX);
+//
+//        currentAngle = 0.0f;
+//        targetAngle = cmd.param2DistAngle;
+//        isTurning = 1;
+//        lastAngleUpdateTime = HAL_GetTick();
+//        osDelay(200);
+//    }
+//
+//    // Calculate time delta
+//    uint32_t currentTime = HAL_GetTick();
+//    float dt = (currentTime - lastAngleUpdateTime) / 1000.0f; // Convert to seconds
+//    lastAngleUpdateTime = currentTime;
+//
+//    // Calculate error (remaining angle)
+//    float error;
+//    if(cmd.command == TURNR) {
+//    	error = currentAngle - targetAngle;
+//    }else{
+//    	error = targetAngle - currentAngle;
+//    }
+//
+//
+//    // Check if target reached (within tolerance)
+//    if (fabs(error) < 2.0f) {
+//        motorStop();
+//        setServoAngle(SERVO_CENTER);
+//        isTurning = 0;
+//        integral = 0.0f;
+//        prevError = 0.0f;
+//
+//        sprintf(buf1, "Target: %.3f", targetAngle);
+//        sprintf(buf2, "Current: %.3f", currentAngle);
+//        return 1;
+//    }
+//
+//    // PID Computation
+//    // Proportional term
+//    float P = Kp * error;
+//
+//    // Integral term with anti-windup
+//    integral += error * dt;
+//    if (integral > integralMax) integral = integralMax;
+//    if (integral < -integralMax) integral = -integralMax;
+//    float I = Ki * integral;
+//
+//    // Derivative term
+//    float D = 0.0f;
+//    if (dt > 0.0f) {
+//        D = Kd * (error - prevError) / dt;
+//    }
+//    prevError = error;
+//
+//    // Calculate PID output
+//    float pidOutput = P + I + D;
+//
+//    // Convert PID output to motor speed with limits
+//    int turnSpeed = (int)fabs(pidOutput);
+//
+//    // Apply speed limits
+//    int maxSpeed = cmd.param1Speed;
+//    if (turnSpeed > maxSpeed) turnSpeed = maxSpeed;
+//    if (turnSpeed < 700) turnSpeed = 700;  // Minimum speed to overcome friction
+//
+//    // Display info
+//    sprintf(buf1, "Target: %.3f", targetAngle);
+//    sprintf(buf2, "Current: %.3f", currentAngle);
+//
+//    // Apply motor speed
+//    motorForwardA(turnSpeed);
+//    motorForwardB(turnSpeed);
+//
+//    return 0;
+//}
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_TIM4_Init();
+  MX_TIM2_Init();
+  MX_TIM9_Init();
+  MX_TIM12_Init();
+  MX_TIM8_Init();
+  MX_TIM3_Init();
+  MX_TIM14_Init();
+  MX_I2C2_Init();
+  MX_USART3_UART_Init();
+  MX_TIM1_Init();
+  /* USER CODE BEGIN 2 */
+  OLED_Init();
+  motorDriveEnable();
+
+  /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  motorCommandQueue = xQueueCreate(2, sizeof(MotorCommand_t));
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* creation of showTask */
+  showTaskHandle = osThreadNew(show, NULL, &showTask_attributes);
+
+  /* creation of motorTask */
+  motorTaskHandle = osThreadNew(motor, NULL, &motorTask_attributes);
+
+  /* creation of encoderTask */
+  encoderTaskHandle = osThreadNew(encoder, NULL, &encoderTask_attributes);
+
+  /* creation of servoTask */
+  servoTaskHandle = osThreadNew(servo, NULL, &servoTask_attributes);
+
+  /* creation of ultrasonicTask */
+  ultrasonicTaskHandle = osThreadNew(ultrasonic, NULL, &ultrasonicTask_attributes);
+
+  /* creation of readIMUTask */
+  readIMUTaskHandle = osThreadNew(readIMU, NULL, &readIMUTask_attributes);
+
+  /* creation of rxSerialTask */
+  rxSerialTaskHandle = osThreadNew(rxSerial, NULL, &rxSerialTask_attributes);
+
+  /* creation of frontWheelCalib */
+  frontWheelCalibHandle = osThreadNew(frontWheelCalibrationTask, NULL, &frontWheelCalib_attributes);
+
+  /* creation of buzzerTask */
+  buzzerTaskHandle = osThreadNew(buzzer, NULL, &buzzerTask_attributes);
+
+  /* creation of irSensorTask */
+  irSensorTaskHandle = osThreadNew(irSensor, NULL, &irSensorTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 64;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV8;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV8;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief I2C2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C2_Init(void)
+{
+
+  /* USER CODE BEGIN I2C2_Init 0 */
+
+  /* USER CODE END I2C2_Init 0 */
+
+  /* USER CODE BEGIN I2C2_Init 1 */
+
+  /* USER CODE END I2C2_Init 1 */
+  hi2c2.Instance = I2C2;
+  hi2c2.Init.ClockSpeed = 400000;
+  hi2c2.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c2.Init.OwnAddress1 = 0;
+  hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c2.Init.OwnAddress2 = 0;
+  hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c2.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C2_Init 2 */
+
+  /* USER CODE END I2C2_Init 2 */
+
+}
+
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 15;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 65535;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 500;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 0;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 65535;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 0;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 0;
+  if (HAL_TIM_Encoder_Init(&htim2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 0;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 65535;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 0;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 0;
+  if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 0;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 7199;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+  HAL_TIM_MspPostInit(&htim4);
+
+}
+
+/**
+  * @brief TIM8 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM8_Init(void)
+{
+
+  /* USER CODE BEGIN TIM8_Init 0 */
+
+  /* USER CODE END TIM8_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM8_Init 1 */
+
+  /* USER CODE END TIM8_Init 1 */
+  htim8.Instance = TIM8;
+  htim8.Init.Prescaler = 16-1;
+  htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim8.Init.Period = 65535;
+  htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim8.Init.RepetitionCounter = 0;
+  htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim8, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_IC_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim8, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_BOTHEDGE;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 8;
+  if (HAL_TIM_IC_ConfigChannel(&htim8, &sConfigIC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM8_Init 2 */
+
+  /* USER CODE END TIM8_Init 2 */
+
+}
+
+/**
+  * @brief TIM9 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM9_Init(void)
+{
+
+  /* USER CODE BEGIN TIM9_Init 0 */
+
+  /* USER CODE END TIM9_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM9_Init 1 */
+
+  /* USER CODE END TIM9_Init 1 */
+  htim9.Instance = TIM9;
+  htim9.Init.Prescaler = 0;
+  htim9.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim9.Init.Period = 7199;
+  htim9.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim9.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim9) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim9, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim9) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim9, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim9, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM9_Init 2 */
+
+  /* USER CODE END TIM9_Init 2 */
+  HAL_TIM_MspPostInit(&htim9);
+
+}
+
+/**
+  * @brief TIM12 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM12_Init(void)
+{
+
+  /* USER CODE BEGIN TIM12_Init 0 */
+
+  /* USER CODE END TIM12_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM12_Init 1 */
+
+  /* USER CODE END TIM12_Init 1 */
+  htim12.Instance = TIM12;
+  htim12.Init.Prescaler = 160;
+  htim12.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim12.Init.Period = 2000;
+  htim12.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim12.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim12) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim12, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim12) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim12, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM12_Init 2 */
+
+  /* USER CODE END TIM12_Init 2 */
+  HAL_TIM_MspPostInit(&htim12);
+
+}
+
+/**
+  * @brief TIM14 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM14_Init(void)
+{
+
+  /* USER CODE BEGIN TIM14_Init 0 */
+
+  /* USER CODE END TIM14_Init 0 */
+
+  /* USER CODE BEGIN TIM14_Init 1 */
+
+  /* USER CODE END TIM14_Init 1 */
+  htim14.Instance = TIM14;
+  htim14.Init.Prescaler = 16-1;
+  htim14.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim14.Init.Period = 65535;
+  htim14.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim14.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim14) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM14_Init 2 */
+
+  /* USER CODE END TIM14_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LED3_GPIO_Port, LED3_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOD, OLED_DC_Pin|OLED_RES_Pin|OLED_SDA_Pin|OLED_SCL_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(ULTRASONIC_SENSOR_GPIO_Port, ULTRASONIC_SENSOR_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : LED3_Pin */
+  GPIO_InitStruct.Pin = LED3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED3_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : OLED_DC_Pin OLED_RES_Pin OLED_SDA_Pin OLED_SCL_Pin */
+  GPIO_InitStruct.Pin = OLED_DC_Pin|OLED_RES_Pin|OLED_SDA_Pin|OLED_SCL_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : ULTRASONIC_SENSOR_Pin */
+  GPIO_InitStruct.Pin = ULTRASONIC_SENSOR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(ULTRASONIC_SENSOR_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : USER_BTN_Pin */
+  GPIO_InitStruct.Pin = USER_BTN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(USER_BTN_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
+	/* prevent unused argument(s) compilation warning */
+
+	UNUSED(huart);
+	HAL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
+	if (rxTemp == ':')
+	{
+		bufferIndex = 0;  // Reset buffer for new command
+		commandReady = 0;
+		rxBuffer[0] = '\0';
+	}
+	// Check for end of command ';'
+	else if (rxTemp == ';'){
+		rxBuffer[bufferIndex] = '\0';  // Null terminate
+		commandReady = 1;
+	}
+	// Store data if we're in a command sequence
+	else if (bufferIndex < 255){
+		rxBuffer[bufferIndex] = rxTemp;
+		bufferIndex++;
+	}
+	else{
+		// Buffer overflow - reset
+		bufferIndex = 0;
+		commandReady = 0;
+		rxBuffer[0] = '\0';
+	}
+	HAL_UART_Receive_IT(&huart3,&rxTemp,1);
+}
+
+//HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+//{
+//	if(isMuted){
+//		isMuted = 0;
+//	}else{
+//		isMuted = 1;
+//	}
+//}
+
+void delay_us(uint16_t us){
+	__HAL_TIM_SET_COUNTER(&htim14, 0);
+	HAL_TIM_Base_Start(&htim14);
+
+	while(__HAL_TIM_GET_COUNTER(&htim14) < us);
+	HAL_TIM_Base_Stop(&htim14);
+}
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim){
+	static count = 0;
+	if(htim==&htim8){
+		if(isRising==1){	//If pin on high, means positive edge
+			// 0xFFFF: only lower 16bits are defined!!! 1 = 0.1ms
+			tc1 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) & 0xFFFF;	//Retrieve value and store in tc1
+//			sprintf(buf1, "t1.%d:%d", count, tc1);
+//			if(count==2){
+//				osDelay(1);
+//			}
+			isRising = 0;
+			HAL_TIM_IC_Stop_IT(htim, TIM_CHANNEL_2);
+			__HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_2, TIM_INPUTCHANNELPOLARITY_FALLING);
+			__HAL_TIM_CLEAR_IT(htim, TIM_IT_CC2);
+			HAL_TIM_IC_Start_IT(htim, TIM_CHANNEL_2);
+		} else {	//If pin on low means negative edge
+			tc2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) & 0xFFFF;	//Retrieve val and store in tc2
+//			sprintf(buf2, "t2.%d:%d", count, tc2);
+			if (tc2 > tc1){
+				echo = tc2-tc1;		//Calculate the differnce = width of pulse
+			} else {
+				echo = (65536-tc1)+tc2;
+			}
+			isRising = 1;
+			HAL_TIM_IC_Stop_IT(htim, TIM_CHANNEL_2);
+			__HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_2, TIM_INPUTCHANNELPOLARITY_RISING);
+			__HAL_TIM_CLEAR_IT(htim, TIM_IT_CC2);
+			HAL_TIM_IC_Start_IT(htim, TIM_CHANNEL_2);
+		}
+	count++;
+	}
+}
+
+void rxSerialParse(void){
+	bufferIndex=0;
+			commandReady=0;
+			// Command parsing variables
+			int32_t cmdid = -1;
+			char component[20]; // The component to be controlled (e.g. MOTOR, SENSOR)
+			char command[20]; // Command (e.g. FWD)
+			uint8_t result[100];
+			// Parse command using sscanf
+			MotorCommand_t cmd;
+			cmd.param1Speed = 20;
+			cmd.param2DistAngle = 0;
+			sscanf(rxBuffer, "%d/%40[^/]/%40[^/]/%d/%d", &cmdid, &component, &command, &cmd.param1Speed, &cmd.param2DistAngle);
+			if(cmdid < 0) {
+				sprintf((uint8_t *)result, "!0/ERROR/INVALID_COMMAND_ID;");
+				HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+				return;
+			}
+			cmd.cmdId = cmdid;
+			if(strcmp(component, "MOTOR") == 0){
+				if(strcmp(command, "PWMTURNL") != 0 && strcmp(command, "PWMTURNR") != 0){
+					cmd.param1Speed *= 71;
+					if(cmd.param1Speed > 7199 || cmd.param1Speed < 0){
+						sprintf(result, "!%d/ERROR/INVALID_SPEED_PARAM_SHOULD_BE_INTEGER_0_TO_101;",cmdid);
+						HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+						return;
+					}
+				}
+				if(strcmp(command, "FWD") == 0){
+					cmd.command = FWD;
+				}else if(strcmp(command, "REV") == 0){
+					cmd.command = REV;
+				}else if(strcmp(command, "STOP") == 0){
+					cmd.command = STOP;
+				}else if(strcmp(command, "TURN90L") == 0){
+					cmd.command = TURN90L;
+				}else if(strcmp(command, "TURN90R") == 0){
+					cmd.command = TURN90R;
+				}else if(strcmp(command, "TURNL") == 0){
+					if(cmd.param2DistAngle > 360) {
+						sprintf(result, "!%d/ERROR/INVALID_ANGLE_PARAM_SHOULD_BE_INTEGER_0_TO_360;",cmdid);
+						HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+						return;
+					}
+					cmd.command = TURNL;
+				}else if(strcmp(command, "TURNR") == 0){
+					if(cmd.param2DistAngle > 360) {
+						sprintf(result, "!%d/ERROR/INVALID_ANGLE_PARAM_SHOULD_BE_INTEGER_0_TO_360;",cmdid);
+						HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+						return;
+					}
+					cmd.command = TURNR;
+				}else if(strcmp(command, "PWMTURNL") == 0){
+					if(cmd.param2DistAngle > 360) {
+						sprintf(result, "!%d/ERROR/INVALID_ANGLE_PARAM_SHOULD_BE_INTEGER_0_TO_360;",cmdid);
+						HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+						return;
+					}
+					cmd.command = PWMTURNL;
+				}else if(strcmp(command, "PWMTURNR") == 0){
+					if(cmd.param2DistAngle > 360) {
+						sprintf(result, "!%d/ERROR/INVALID_ANGLE_PARAM_SHOULD_BE_INTEGER_0_TO_360;",cmdid);
+						HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+						return;
+					}
+					cmd.command = PWMTURNR;
+				}else if(strcmp(command, "TASK2") == 0){
+					cmd.command = TASK2;
+				}else{
+					sprintf(result, "!%d/ERROR/MOTOR_CONTROL_COMMAND_NOT_IMPLEMENTED_YET;",cmdid);
+					HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+					return;
+				}
+				if(xQueueSend(motorCommandQueue, &cmd, pdMS_TO_TICKS(100)) != pdPASS){
+					sprintf(result, "!%d/ERROR/MOTOR_COMMAND_QUEUE_IS_FULL;",cmdid);
+					HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+					return;
+				}
+				sprintf(result, "!%d/OK/MOTOR_CONTROL_SUCCESS;",cmdid);
+				HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+				return;
+			}else if(strcmp(component, "GENERAL") == 0){
+				if(strcmp(command, "CAPTURE") == 0){
+					music = CAPTURE;
+				}else if(strcmp(command, "DONE") == 0){
+					music = DONE;
+					isContinue = 0;
+				}
+			}else if(strcmp(component, "SENSOR") == 0){
+				// REPORT SENSOR STATUS?
+			}else if(strcmp(command, "CAPTURE1") == 0){
+				capture1 = cmd.param1Speed;
+			}else if(strcmp(command, "CAPTURE2") == 0){
+				capture2 = cmd.param1Speed;
+			}else{
+				sprintf((uint8_t *)result, "!%d/ERROR/INVALID_COMMAND;",cmdid);
+				HAL_UART_Transmit(&huart3,(uint8_t *)result,strlen(result),0xFFFF);
+			}
+}
+/* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  uint8_t ch = 'A';
+  HAL_UART_Receive_IT(&huart3,&rxTemp,1);
+  /* Infinite loop */
+  for(;;)
+  {
+//	HAL_UART_Transmit(&huart3,(uint8_t *)&ch,1,0xFFFF);
+//	if (ch<'Z'){
+//		ch++;
+//	}
+//	else{
+//		ch='A';
+//	}
+
+	//HAL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
+    osDelay(1000);
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_show */
+/* USER CODE END 4 */
+/**
+* @brief Function implementing the showTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_show */
+void show(void *argument)
+{
+  /* USER CODE BEGIN show */
+//  uint8_t buf[20] = "SC2079 MDP G29\0";
+
+  /* Infinite loop */
+  for(;;)
+  {
+//	sprintf(buf3, "%d us\0", echo);
+//	sprintf(buf4, "%7.2f mm\0", distance);
+	OLED_ShowString(10, 10, buf);
+	sprintf(buf3, "x: %6.2f\0", x);
+    sprintf(buf4, "y: %6.2f\0", y);
+//    sprintf(buf4, "lnow: %d\0", leftNow);
+    sprintf(buf2, "d: %6.2f\0", distance);
+//	OLED_ShowString(10, 20, buf1);
+//	OLED_ShowString(10, 20, rxBuffer);
+	OLED_ShowString(10, 30, buf2);
+	OLED_ShowString(10, 40, buf3);
+	OLED_ShowString(10, 50, buf4);
+	OLED_Refresh_Gram();
+    osDelay(100);
+  }
+  /* USER CODE END show */
+}
+
+/* USER CODE BEGIN Header_motor */
+/**
+  * @brief  Function implementing the motorTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_motor */
+void motor(void *argument)
+{
+  /* USER CODE BEGIN motor */
+  MotorCommand_t cmd;
+  uint8_t ack[50] = {0};
+  setServoAngle(SERVO_RIGHT_MAX);
+  osDelay(500);
+  setServoAngle(SERVO_CENTER);
+  osDelay(500);
+  enum {FWD,REV,STOP,TURNL,TURNR, TURN90L, TURN90R, TASK2} currentState = STOP;
+  uint8_t isStateChanged = 0;
+  while(isContinue) {
+	  if(xQueueReceive(motorCommandQueue, &cmd, 0) == pdPASS){
+		  currentState = cmd.command;
+		  isStateChanged = 1;
+	  }else{
+		  isStateChanged = 0;
+	  }
+	  if(currentState != STOP && music == MUTE && isContinue) music=BGM;
+	  switch(currentState) {
+	  if(isContinue==0) currentState = STOP;
+	  case FWD:
+		  if(motorPidForward(cmd, isStateChanged)) {
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case REV:
+		  if(motorPidReverse(cmd, isStateChanged)) {
+		  	currentState = STOP;
+		  	motorStop();
+		  	sprintf(ack, "!%d/DONE;",cmd.cmdId);
+		  	HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case TURN90L:
+		  if(motorTurn90L(cmd, isStateChanged)){
+		  	currentState = STOP;
+		  	motorStop();
+		  	sprintf(ack, "!%d/DONE;",cmd.cmdId);
+		  	HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case TURN90R:
+		  if(motorTurn90R(cmd, isStateChanged)){
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case TASK2:
+		  if(task2Loop(cmd, isStateChanged)){
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case PWMTURNL:
+		  if(motorTurnPwmL(cmd, isStateChanged)){
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case PWMTURNR:
+	  	  if(motorTurnPwmR(cmd, isStateChanged)){
+	  		  currentState = STOP;
+	  		  motorStop();
+	  		  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+	  		  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+	  	  }
+	  	  break;
+	  case TURNL:
+		  if(motorTurn(cmd, isStateChanged)){
+			  currentState = STOP;
+			  motorStop();
+			  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+			  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+		  }
+		  break;
+	  case TURNR:
+	  	  if(motorTurn(cmd, isStateChanged)){
+	  		  currentState = STOP;
+	  		  motorStop();
+	  		  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+	  		  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+	  	  }
+	  	  break;
+	  case STOP:
+		  if(isStateChanged){
+			  isFrontCalib = 0;
+			  isTurning = 0;
+			  motorStop();
+			  if(cmd.command == STOP){
+				  sprintf(ack, "!%d/DONE;",cmd.cmdId);
+				  HAL_UART_Transmit(&huart3,ack,strlen(ack),0xFFFF);
+			  }
+		  }
+	  }
+	  osDelay(1);
+  }
+
+  motorStop();
+  setServoAngle(SERVO_CENTER);
+
+  for(;;) osDelay(1000);
+  /* USER CODE END motor */
+}
+
+/* USER CODE BEGIN Header_encoder */
+/**
+* @brief Function implementing the encoderTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_encoder */
+void encoder(void *argument)
+{
+  /* USER CODE BEGIN encoder */
+  HAL_TIM_Encoder_Start(&htim2,TIM_CHANNEL_ALL);
+  HAL_TIM_Encoder_Start(&htim3,TIM_CHANNEL_ALL);
+
+  int cnt1A, cnt2A;
+  int cnt1B, cnt2B;
+
+  cnt1A = __HAL_TIM_GET_COUNTER(&htim2);
+  cnt1B = __HAL_TIM_GET_COUNTER(&htim3);
+
+  uint16_t dirA, dirB;
+
+  /* Infinite loop */
+  for(;;)
+  {
+		cnt2A = __HAL_TIM_GET_COUNTER(&htim2);
+		cnt2B = __HAL_TIM_GET_COUNTER(&htim3);
+
+		// handle overflow / underflow
+		if (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim2)){
+			if (cnt2A < cnt1A){
+				pidA.measured_speed = cnt1A - cnt2A;
+			}
+			else{
+				pidA.measured_speed = (65535 - cnt2A) + cnt1A;
+			}
+		}
+		else{
+			if (cnt2A > cnt1A){
+				pidA.measured_speed = cnt2A - cnt1A;
+			}
+			else{
+				pidA.measured_speed = (65535 - cnt1A) + cnt2A;
+			}
+		}
+
+		// encoder for motorB
+		if (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim3)){
+			if (cnt2B < cnt1B){
+				pidB.measured_speed = cnt1B - cnt2B;
+			}
+			else{
+				pidB.measured_speed = (65535 - cnt2B) + cnt1B;
+			}
+		}
+		else{
+			if (cnt2B > cnt1B){
+				pidB.measured_speed = cnt2B - cnt1B;
+			}
+			else{
+				pidB.measured_speed = (65535 - cnt1B) + cnt2B;
+			}
+		}
+
+		dirA = __HAL_TIM_IS_TIM_COUNTING_DOWN(&htim2);
+//		sprintf(buf1, "MtrA:%5d | %1d", pidA.measured_speed, !dirA);
+
+		dirB = __HAL_TIM_IS_TIM_COUNTING_DOWN(&htim3);
+//		sprintf(buf2, "MtrB:%5d | %1d", pidB.measured_speed, dirB);
+
+		cnt1A = __HAL_TIM_GET_COUNTER(&htim2);
+		cnt1B = __HAL_TIM_GET_COUNTER(&htim3);
+    osDelay(10);
+  }
+  /* USER CODE END encoder */
+}
+
+/* USER CODE BEGIN Header_servo */
+/**
+* @brief Function implementing the servoTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_servo */
+void servo(void *argument)
+{
+  /* USER CODE BEGIN servo */
+  HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_1);
+  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, SERVO_CENTER);
+  /* Infinite loop */
+  for(;;)
+  {
+	  if(isFrontCalib){
+		  for (int angle = SERVO_LEFT_MAX; angle <= SERVO_RIGHT_MAX; angle += SERVO_CENTER_A_PERCENTAGE){
+			  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, angle);
+			  osDelay(5);
+		  }
+		  for (int angle = SERVO_RIGHT_MAX; angle >= SERVO_LEFT_MAX; angle -= SERVO_CENTER_A_PERCENTAGE){
+			  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, angle);
+			  osDelay(5);
+		  }
+		  __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, SERVO_CENTER);
+		  isFrontCalib = 0;
+	  }
+    osDelay(100);
+  }
+  /* USER CODE END servo */
+}
+
+/* USER CODE BEGIN Header_ultrasonic */
+/**
+* @brief Function implementing the ultrasonicTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_ultrasonic */
+void ultrasonic(void *argument)
+{
+  /* USER CODE BEGIN ultrasonic */
+  /* Infinite loop */
+  osDelay(500);
+  HAL_TIM_IC_Start_IT(&htim8, TIM_CHANNEL_2);
+  for(;;)
+  {
+	  __HAL_TIM_SET_COUNTER(&htim8, 0);
+	  // Capture rising (after sending)
+	  __HAL_TIM_SET_CAPTUREPOLARITY(&htim8, TIM_CHANNEL_2, TIM_INPUTCHANNELPOLARITY_RISING);
+	  isRising = 1;
+//	  Set TRIG to low for awhile
+	  HAL_GPIO_WritePin(ULTRASONIC_SENSOR_GPIO_Port, ULTRASONIC_SENSOR_Pin, GPIO_PIN_RESET);
+	  osDelay(50);
+	  //Output 1us of Trig
+	  HAL_GPIO_WritePin(ULTRASONIC_SENSOR_GPIO_Port, ULTRASONIC_SENSOR_Pin, GPIO_PIN_SET);
+	  delay_us(10);
+	  HAL_GPIO_WritePin(ULTRASONIC_SENSOR_GPIO_Port, ULTRASONIC_SENSOR_Pin, GPIO_PIN_RESET);
+
+	  // Assume the callback function has retrieved tc1 & tc2
+
+	  //measure
+	  distance = (float)echo * (171.5f) / 1000.0f;
+
+//	  sprintf(buf4, "Dist: %5.1f mm", distance);
+  }
+  /* USER CODE END ultrasonic */
+}
+
+/* USER CODE BEGIN Header_readIMU */
+/**
+* @brief Function implementing the readIMUTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_readIMU */
+void readIMU(void *argument)
+{
+  /* USER CODE BEGIN readIMU */
+	uint8_t gyro_reg_addr = 0x37;    // start from GYRO_ZOUT_H
+	uint8_t gyro_rawData[2];         // to store MSB and LSB
+	int16_t gyro_z_raw;
+	float gyro_z_dps_calibrated = 0.0f; // Calibrated gyro Z-axis value
+
+	uint32_t currentTime;
+    static uint32_t lastLoopTime = 0; // Static to track time across iterations
+    float dt_sec = 0.0f;
+
+    float mag_heading_rad = 0.0f;
+    const float COMPLEMENTARY_FILTER_ALPHA = 0.02f; // Adjust based on sensor noise and desired responsiveness
+
+	icm20948_init();
+	osDelay(1000); //delay to make sure ICM 20948 power up
+
+	lastLoopTime = HAL_GetTick(); // Initialize lastLoopTime
+
+  /* Infinite loop */
+  for(;;)
+  {
+      // Calculate delta time for this loop iteration
+      currentTime = HAL_GetTick();
+      dt_sec = (float)(currentTime - lastLoopTime) / 1000.0f; // Convert to seconds
+      lastLoopTime = currentTime;
+
+	  // -------------- GYROSCOPE READINGS ---------------------------------------
+      // Using HAL_I2C_Mem_Read for consistency and conciseness
+	  if (HAL_I2C_Mem_Read(&hi2c2, ICM20948_I2C_ADDR, gyro_reg_addr, I2C_MEMADD_SIZE_8BIT, gyro_rawData, 2, 1000)!=HAL_OK){
+	      // Error reading gyroscope data
+	  } else {
+	      // Combine into signed 16-bit value
+	      gyro_z_raw = (int16_t)((gyro_rawData[0] << 8) | gyro_rawData[1]);
+	      
+	      // Apply calibration/scaling (e.g., divide by sensitivity factor)
+	      // For ICM20948 with default settings, 131.0 LSB/dps for 250 dps range
+	      gyro_z_dps_calibrated = (float)gyro_z_raw / 131.0f;
+	      gyro_z_dps_calibrated = -gyro_z_dps_calibrated; // Invert sign for correct rotation direction
+	      if(fabs(gyro_z_dps_calibrated) < 0.5f){ // Small deadband to reduce noise integration
+	          gyro_z_dps_calibrated = 0.0f;
+	      }
+	      // Update global gyro_z_dps for other uses (e.g. debugging)
+	      gyro_z_dps = gyro_z_dps_calibrated;
+	  }
+
+
+	  // -------------- MAGNETOMETER READINGS ------------------------------------
+      uint8_t mag_data[8]; // 6 data bytes + 2 status bytes
+      uint8_t st1;
+      uint8_t retries = 5;
+
+      // Wait for data ready (DRDY bit 0 in ST1)
+      do {
+          if (HAL_I2C_Mem_Read(&hi2c2, AK09916_I2C_ADDR, AK09916_ST1_REG, I2C_MEMADD_SIZE_8BIT, &st1, 1, 100) != HAL_OK) {
+              // Error reading ST1, break loop for this iteration
+              break;
+          }
+          if (retries-- == 0) {
+              // Data never became ready within retries, break loop
+              break;
+          }
+          osDelay(1); // Small delay before re-checking
+      } while (!(st1 & 0x01)); // Check DRDY bit (bit 0)
+
+      if (retries > 0) { // Only read magnetic data if it was ready
+          // Read 8 bytes: HXL, HXH, HYL, HYH, HZL, HZH, ST2
+          if (HAL_I2C_Mem_Read(&hi2c2, AK09916_I2C_ADDR, AK09916_HXL_REG, I2C_MEMADD_SIZE_8BIT, mag_data, 8, 100) != HAL_OK) {
+              // Error reading magnetic data
+          } else {
+              // Combine bytes into 16-bit values (little-endian)
+              magX = (int16_t)(mag_data[1] << 8 | mag_data[0]);
+              magY = (int16_t)(mag_data[3] << 8 | mag_data[2]);
+              magZ = (int16_t)(mag_data[5] << 8 | mag_data[4]);
+
+              // Check ST2 register (mag_data[7] contains ST2) for overflow (HOFL bit 3)
+              if (mag_data[7] & 0x08) {
+                  // Magnetic sensor overflow has occurred.
+              }
+          }
+      }
+
+    // --- MAGNETOMETER YAW CALCULATION ---
+    // Convert raw magX, magY to heading. Requires calibration for best results.
+    // For now, a simple atan2 is used.
+    // Ensure to account for sensor orientation on the board relative to robot's forward.
+    // E.g., if +X is forward and +Y is left on the sensor, and robot +X is forward, +Y is left,
+    // then atan2(magY, magX) might give heading relative to sensor X-axis.
+    // Adjust based on how sensor is mounted.
+    mag_heading_rad = atan2f((float)magY, (float)-magX); // in radians
+    float mag_heading_deg = mag_heading_rad * (180.0f / M_PI); // Convert to degrees
+
+    // Normalize to 0-360 degrees
+    if (mag_heading_deg < 0) mag_heading_deg += 360.0f;
+
+
+    // --- COMPLEMENTARY FILTER FOR YAW ---
+    // dt_sec is already calculated at the beginning of the loop
+
+    if (dt_sec > 0) {
+        // Integrate gyro (angular velocity * time)
+        float gyro_angle_change = gyro_z_dps_calibrated * dt_sec;
+        float gyro_integrated_angle = currentAngle + gyro_angle_change; // currentAngle is our current best estimate
+
+        // Normalize mag_heading_deg to be close to gyro_integrated_angle for smooth blending
+        // This is important to avoid large jumps if mag_heading_deg crosses 0/360 boundary
+        float angle_diff = mag_heading_deg - gyro_integrated_angle;
+        if (angle_diff > 180.0f) angle_diff -= 360.0f;
+        if (angle_diff < -180.0f) angle_diff += 360.0f;
+        mag_heading_deg = gyro_integrated_angle + angle_diff;
+
+
+        // Complementary filter equation:
+        // long-term stability from magnetometer, short-term dynamics from gyroscope
+        complementary_filter_angle = COMPLEMENTARY_FILTER_ALPHA * mag_heading_deg + (1.0f - COMPLEMENTARY_FILTER_ALPHA) * gyro_integrated_angle;
+
+        // Normalize the final angle to 0-360
+        // (This assumes we want the output angle to be within 0-360 range for target comparison)
+        if (complementary_filter_angle >= 360.0f) complementary_filter_angle -= 360.0f;
+        if (complementary_filter_angle < 0.0f) complementary_filter_angle += 360.0f;
+
+        // Update currentAngle with the fused estimate
+        currentAngle = complementary_filter_angle;
+    }
+    // for debugging, angle seems to be stalling
+//    sprintf((char*)buf1,"gyro_z_raw: %.1f deg\n", gyro_z_raw);
+//	HAL_UART_Transmit(&huart3,buf1,strlen(buf1),0xFFFF);
+//	sprintf((char*)buf2,"mag_heading_deg:%.1f deg\n", mag_heading_deg);
+//	HAL_UART_Transmit(&huart3,buf2,strlen(buf2),0xFFFF);
+//	sprintf((char*)buf3,"gyro_z_dps_calibrated:%.1f\n", gyro_z_dps_calibrated);
+//	HAL_UART_Transmit(&huart3,buf3,strlen(buf3),0xFFFF);
+//	sprintf((char*)buf4,"complementary_filter_angle:%.1f\n", complementary_filter_angle);
+//	HAL_UART_Transmit(&huart3,buf4,strlen(buf4),0xFFFF);
+
+//   static uint32_t lastReadIMUPrintTime = 0;
+//   if (HAL_GetTick() - lastReadIMUPrintTime > 500) { // Print every 500ms
+//	   char debug_msg[150]; // Increased buffer size for multiple floats
+//	   int len = snprintf(debug_msg, sizeof(debug_msg),
+//	   "GZ_DPS:%.1f MAG_HDG:%.1f CFLT:%.1f CA:%.1f\r\n",
+//	   gyro_z_dps_calibrated, mag_heading_deg, complementary_filter_angle, currentAngle);
+//	   HAL_UART_Transmit(&huart3, (uint8_t*)debug_msg, len, HAL_MAX_DELAY);
+//	   lastReadIMUPrintTime = HAL_GetTick();
+//   }
+
+	osDelay(10); // Maintain the loop delay
+  }
+  /* USER CODE END readIMU */
+}
+
+/* USER CODE BEGIN Header_rxSerial */
+/**
+* @brief Function implementing the rxSerialTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_rxSerial */
+void rxSerial(void *argument)
+{
+  /* USER CODE BEGIN rxSerial */
+  /* Infinite loop */
+  for(;;)
+  {
+	if(commandReady){
+		rxSerialParse();
+	}
+    osDelay(1);
+  }
+  /* USER CODE END rxSerial */
+}
+
+/* USER CODE BEGIN Header_frontWheelCalibrationTask */
+/**
+* @brief Function implementing the frontWheelCalib thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_frontWheelCalibrationTask */
+void frontWheelCalibrationTask(void *argument)
+{
+  /* USER CODE BEGIN frontWheelCalibrationTask */
+  /* Infinite loop */
+  static uint8_t isA = 0;
+  for(;;)
+  {
+	  if(isFrontCalib){
+		  if(isA){
+			  setServoAngle(SERVO_CENTER_B);
+			  isA = 0;
+			  osDelay(100-SERVO_CENTER_A_PERCENTAGE);
+		  }else{
+			  setServoAngle(SERVO_CENTER_A);
+			  isA = 1;
+			  osDelay(SERVO_CENTER_A_PERCENTAGE);
+		  }
+	  }else{
+		  osDelay(10);
+	  }
+  }
+  /* USER CODE END frontWheelCalibrationTask */
+}
+
+/* USER CODE BEGIN Header_buzzer */
+/**
+* @brief Function implementing the buzzerTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_buzzer */
+void buzzer(void *argument)
+{
+  /* USER CODE BEGIN buzzer */
+	const uint8_t melodySize = sizeof(melody) / sizeof(int);
+	const uint8_t noteCount = sizeof(zelda_hz) / sizeof(int);
+	uint8_t i = 0;
+  /* Infinite loop */
+		playNote(523, 100);  // C5
+	    playNote(587, 100);  // D5
+	    playNote(659, 100);  // E5
+//	    playNote(698, 200);  // F5
+//	    playNote(784, 200);  // G5
+//	    playNote(880, 200);  // A5
+//	    playNote(988, 200);  // B5
+//	    playNote(1047, 500); // C6
+//	    osDelay(1000);
+	    MotorCommand_t cmd;
+	    cmd.param1Speed = 20;
+	    cmd.param2DistAngle = 0;
+	    cmd.cmdId = 1;
+	    cmd.command = TASK2;
+	    osDelay(5000);
+//	    xQueueSend(motorCommandQueue, &cmd, pdMS_TO_TICKS(100));
+  for(;;)
+  {
+
+	  osDelay(1000);
+//	  HAL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
+//	  playNote(523, 200);
+	  continue;
+
+	  if(music==MUTE){
+		  osDelay(500);
+	  }else if(music==BGM){
+		  if(i==melodySize){
+			  i = 0;
+			  osDelay(1000);
+		  }
+	      playNote(melody[i], melody_durations[i]);
+	      i++;
+	  }else if(music==CAPTURE){
+		  osDelay(50);
+		  for(uint16_t i = 0; i < noteCount; i++) {
+		  	    playNote(zelda_hz[i], zelda_durations[i]);
+		  }
+		  music=BGM;
+		  osDelay(50);
+	  }else if(music==DONE){
+		  osDelay(50);
+		  playNote(1047, 150); // C6
+		  playNote(988, 150);  // B5
+		  playNote(880, 150);  // A5
+		  playNote(784, 150);  // G5
+		  playNote(698, 150);  // F5
+		  playNote(659, 150);  // E5
+		  playNote(587, 150);  // D5
+		  playNote(523, 500);  // C5
+		  music=MUTE;
+	  }else{
+		  osDelay(500);
+	  }
+  }
+  /* USER CODE END buzzer */
+}
+
+
+/* USER CODE BEGIN Header_irSensor */
+/**
+* @brief Function implementing the irSensorTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_irSensor */
+void irSensor(void *argument)
+{
+  /* USER CODE BEGIN irSensor */
+  static uint8_t leftPrev  = 0;
+  static uint8_t rightPrev = 0;
+  IR_Sensors_Init();
+  leftPrev  = IR_LeftDetected();
+  rightPrev = IR_RightDetected();
+  /* Infinite loop */
+  for(;;)
+  {
+	  leftNow = IR_LeftDetected();
+	  rightNow = IR_RightDetected();
+	  if (leftNow != leftPrev || rightNow != rightPrev){
+	  	  //	OLED_PrintStatus(leftNow, rightNow);  // instant flip: DETECTED/CLEAR
+	  	  		leftPrev  = leftNow;
+	  	  		rightPrev = rightNow;
+	  }
+	  	  //	sprintf(buf4, "left detected: %d\0", leftNow);
+
+	  	  	// optional: small delay so we don’t spin at 100% CPU
+	  osDelay(50);
+  }
+  /* USER CODE END irSensor */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

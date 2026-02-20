@@ -3,11 +3,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 class FakePathServer(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/path':
-            print("[Fake Path Server] Received path request. Sending hardcoded route.")
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            print(f"[Fake Path Server] Received path request with payload: {body.decode('utf-8')}")
+
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            # A long route with moves and snapshots to test concurrency
+            # The 'data' wrapper is re-added as the C parser expects it.
             response = """
 {
     "data": {
@@ -43,14 +46,15 @@ class FakePathServer(BaseHTTPRequestHandler):
 }
             """
             self.wfile.write(response.encode('utf-8'))
+            print("[Fake Path Server] Sent hardcoded route with 'data' wrapper.")
         else:
             self.send_response(404)
             self.end_headers()
 
 def run_path_server():
-    server_address = ('0.0.0.0', 4000) # Changed to port 4000
+    server_address = ('0.0.0.0', 5000) # Changed to port 5000
     httpd = HTTPServer(server_address, FakePathServer)
-    print('Fake Pathfinding Server running on http://localhost:4000 ...') # Changed port in print
+    print('Fake Pathfinding Server running on http://localhost:5000 ...') # Changed port in print
     httpd.serve_forever()
 
 if __name__ == '__main__':
