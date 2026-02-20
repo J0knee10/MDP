@@ -46,7 +46,7 @@ class CommandGenerator:
             
             # SNAPSHOT
             if curr.screenshot_id != -1:
-                commands.append(f"SNAP{curr.screenshot_id}")
+                commands.append(f"SP{curr.screenshot_id}")
                 
         commands.append("FIN")
         return self.compress_commands(commands)

@@ -68,7 +68,7 @@ class BullseyeHandler:
                 if path:
                     cmds = self.cmd_gen.generate_commands(path)
                     cmds = [c for c in cmds if c != "FIN"]
-                    cmds.append(f"SNAP{obstacle.obstacle_id}")
+                    cmds.append(f"SP{obstacle.obstacle_id}")
                     return candidate, path, cmds
 
         print(f"  [BullseyeHandler] Cannot reach correct face of obstacle {obstacle.obstacle_id}.")

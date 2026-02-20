@@ -46,8 +46,12 @@ class PathPoint(BaseModel):
     d: int
     s: int
 
-class AlgorithmOutput(BaseModel):
+class AlgorithmData(BaseModel):
     commands: List[str]
+    snap_positions: List[PathPoint]
+
+class AlgorithmOutput(BaseModel):
+    data: AlgorithmData
     path: List[PathPoint]
     distance: float
 
@@ -73,6 +77,7 @@ class BullseyeInput(BaseModel):
 
 
 class BullseyeOutput(BaseModel):
+    data: AlgorithmData
     # Unified path for playback (phase1 + phase2 stitched together)
     full_path: List[PathPoint]
     full_commands: List[str]
@@ -116,12 +121,17 @@ def run_algorithm(
     cmd_gen = CommandGenerator()
     raw_commands = cmd_gen.generate_commands(full_path)
 
+    path_points = [
+        {"x": s.x, "y": s.y, "d": int(s.direction), "s": s.screenshot_id}
+        for s in full_path
+    ]
+
     return {
-        "commands": raw_commands,
-        "path": [
-            {"x": s.x, "y": s.y, "d": int(s.direction), "s": s.screenshot_id}
-            for s in full_path
-        ],
+        "data": {
+            "commands": raw_commands,
+            "snap_positions": [p for p in path_points if p["s"] != -1]
+        },
+        "path": path_points,
         "distance": total_cost
     }
 
@@ -195,6 +205,11 @@ def handle_bullseye(input_data: BullseyeInput):
             robot_dir=input_data.robot_dir,
             remaining_obstacles_data=remaining_data,
         )
+        # Wrap result for RPi
+        result["data"] = {
+            "commands": result["full_commands"],
+            "snap_positions": [p for p in result["full_path"] if p["s"] != -1]
+        }
         return result
 
     except ValueError as e:
