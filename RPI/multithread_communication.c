@@ -6,34 +6,55 @@
 #include <curl/curl.h>
 #include <time.h> // For pthread_cond_timedwait
 #include <errno.h> // For ETIMEDOUT
+#include <ctype.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
 #include "shared_types.h"
 #include "rpi_hal.h"
 #include "json_parser.h" // New include
 
 // Definition for DIR_MAP_ANDROID_STR, declared in shared_types.h
+// Maps RPi internal (0,2,4,6) to Android's (1=N, 2=E, 3=S, 4=W)
 const char* DIR_MAP_ANDROID_STR[8] = {
-    "N", "NE", "E", "SE", "S", "SW", "W", "NW"
+    "1", "1", "2", "2", "3", "3", "4", "4"
 };
 
-// --- Configuration ---
-#ifdef RPI_TESTING
-const char* STM32_DEVICE_WRITE = "rpi_to_stm";
-const char* STM32_DEVICE_READ = "stm_to_rpi";
-const char* ANDROID_DEVICE = "/dev/rfcomm0";
-const char* PATHFINDING_SERVER_URL = "http://192.168.22.26:5000/path";
-const char* IMAGE_SERVER_URL = "http://192.168.22.26:4000/detect";
-#elif defined(FAKE_ANDROID_SIMULATION)
-const char* STM32_DEVICE = "/dev/ttyACM0";
-const char* ANDROID_DEVICE = "android_to_rpi";
-const char* PATHFINDING_SERVER_URL = "http://192.168.22.24:5000/path";
-const char* IMAGE_SERVER_URL = "http://192.168.22.21:5000/detect";
-#else
-const char* STM32_DEVICE = "/dev/ttyACM0";
-const char* ANDROID_DEVICE = "/dev/rfcomm0";
-const char* PATHFINDING_SERVER_URL = "http://192.168.22.24:5000/path";
-const char* IMAGE_SERVER_URL = "http://192.168.22.21:5000/detect";
+// --- Configuration Toggles ---
+// Set to 1 to use Named Pipes (Simulation), 0 to use /dev/ devices (Hardware)
+#ifndef STM32_SIM
+#define STM32_SIM   0
 #endif
+
+#ifndef ANDROID_SIM
+#define ANDROID_SIM 0
+#endif
+
+// Device Paths
+const char* STM32_HW_DEVICE    = "/dev/ttyACM0";
+const char* ANDROID_HW_DEVICE  = "/dev/rfcomm0";
+
+const char* STM32_PIPE_WRITE   = "rpi_to_stm";
+const char* STM32_PIPE_READ    = "stm_to_rpi";
+const char* ANDROID_PIPE_READ  = "android_to_rpi";
+const char* ANDROID_PIPE_WRITE = "rpi_to_android";
+
+const char* PATHFINDING_SERVER_URL = "http://192.168.22.25:5000/path";
+const char* IMAGE_SERVER_URL       = "http://192.168.22.21:4000/detect"; //.21 is jayda, .26 is jon, .24 is shavonne, .25 is syed
+
+// --- Livestream (PC YOLO) wiring for Task 2 ---
+// Set to 1 to use livestream-triggered detection for Task 2 instead of uploading images to IMAGE_SERVER_URL.
+// Can be overridden from the Makefile with: -DUSE_LIVESTREAM_TASK2=0/1
+#ifndef USE_LIVESTREAM_TASK2
+#define USE_LIVESTREAM_TASK2 0
+#endif
+// PC host running Image/livestream/stream_test.py (LOCK trigger listener, default port 5002).
+// IMPORTANT: set this to your laptop IP on the Pi network.
+const char* PC_LOCK_HOST = "192.168.22.26";
+const int   PC_LOCK_PORT = 5002;
+// Pi Python stream_server.py forwards RESULT JSON to this localhost UDP port.
+const int   RESULT_UDP_PORT = 5555;
 
 const int BAUD_RATE = 115200;
 const char* CAPTURE_FILENAME = "capture.jpg";
@@ -41,11 +62,32 @@ const char* CAPTURE_FILENAME = "capture.jpg";
 // --- Global Shared Application Context ---
 SharedAppContext g_app_context;
 
-#ifdef RPI_TESTING
-// In test mode, we need a separate file descriptor for reading ACKs
-// to avoid the process reading its own commands from the write pipe.
+// Separate descriptor for reading ACKs in simulation mode
 int g_stm32_ack_fd = -1;
-#endif
+
+// Task 2 livestream RESULT synchronization
+static pthread_mutex_t g_task2_result_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_task2_result_cond  = PTHREAD_COND_INITIALIZER;
+static int g_task2_result_ready[3] = {0, 0, 0}; // index 1..2
+static int g_task2_result_img_id[3] = {-1, -1, -1};
+
+// Signal handler for Ctrl+C to ensure clean exit and port closure
+void handle_sigint(int sig) {
+    printf("\n[Signal] SIGINT (Ctrl+C) received. Closing ports and exiting...\n");
+    
+    // Explicitly close all file descriptors if they were opened
+    if (g_stm32_ack_fd != -1) close(g_stm32_ack_fd);
+    if (g_app_context.stm32_fd != -1 && g_app_context.stm32_fd != g_stm32_ack_fd) {
+        close(g_app_context.stm32_fd);
+    }
+    if (g_app_context.android_fd != -1) close(g_app_context.android_fd);
+    if (g_app_context.android_write_fd != -1 && g_app_context.android_write_fd != g_app_context.android_fd) {
+        close(g_app_context.android_write_fd);
+    }
+    
+    curl_global_cleanup();
+    exit(0);
+}
 
 
 // =================================================================================
@@ -65,6 +107,7 @@ static int post_image_to_server_thread(int obstacle_id, char* response_buffer, i
 
     curl = curl_easy_init();
     if (curl) {
+        printf("[ImgThread] Sending image for obstacle %d to image server at %s...\n", obstacle_id, IMAGE_SERVER_URL);
         curl_mime *form = curl_mime_init(curl);
         curl_mimepart *field;
 
@@ -124,18 +167,12 @@ void* process_image_thread(void* args) {
         pthread_cond_signal(&context->image_capture_cond);
         pthread_mutex_unlock(&context->image_capture_mutex);
 
-        // Send robot position to Android (Python's ROBOT,x,y,d)
-        char robot_pos_msg[100];
-        // Use +1 for x and y to match Python's 1-indexed coordinates for Android
-        const char* dir_str = (task_args->robot_snap_position.d >= 0 && task_args->robot_snap_position.d < 8) ?
-                               DIR_MAP_ANDROID_STR[task_args->robot_snap_position.d] : "U"; // U for unknown
-        snprintf(robot_pos_msg, sizeof(robot_pos_msg), "\"ROBOT,%d,%d,%s\"\n",
-                 task_args->robot_snap_position.x + 1, task_args->robot_snap_position.y + 1, dir_str);
-        send_message_to_android_with_ack(context->android_fd, robot_pos_msg);
-        printf("[ImgThread] Sent robot position to Android: %s", robot_pos_msg);
+        // Notify Android that capture is starting
+        char capture_status[100];
+        snprintf(capture_status, sizeof(capture_status), "Capturing image for obstacle %d", task_args->obstacle_id);
+        send_android_json(context->android_write_fd, "image", capture_status, false);
 
-
-        // Post image and get response
+        // Send image detection result to Android in the new JSON format
         if (post_image_to_server_thread(task_args->obstacle_id, image_server_response, sizeof(image_server_response)) == 0) {
             printf("[ImgThread] Image server response: %s\n", image_server_response);
 
@@ -145,55 +182,116 @@ void* process_image_thread(void* args) {
             if (get_json_int(image_server_response, "count", &count) != 0 || count <= 0) {
                 printf("[ImgThread] No object detected by image server for obstacle %d.\n", task_args->obstacle_id);
             } else {
-                const char* objects_array_start = strstr(image_server_response, "\"objects\":[");
+                // Robustly find the start of the "objects" array
+                const char* objects_key = strstr(image_server_response, "\"objects\"");
+                const char* objects_array_start = NULL;
+                
+                if (objects_key) {
+                    const char* p = objects_key + strlen("\"objects\"");
+                    while (*p && isspace((unsigned char)*p)) p++;
+                    if (*p == ':') {
+                        p++;
+                        while (*p && isspace((unsigned char)*p)) p++;
+                        if (*p == '[') {
+                            objects_array_start = p + 1;
+                        }
+                    }
+                }
+
                 if (objects_array_start) {
-                    objects_array_start += strlen("\"objects\":[");
                     const char* ptr = objects_array_start;
                     int sent = 0;
                     while (*ptr && sent == 0) {
                         const char* obj_start = strchr(ptr, '{');
                         if (!obj_start) break;
-                        int depth = 1;
-                        const char* p = obj_start + 1;
-                        while (*p && depth > 0) {
+                        
+                        // Find matching closing brace
+                        int depth = 0;
+                        const char* p = obj_start;
+                        const char* obj_end = NULL;
+                        while (*p) {
                             if (*p == '{') depth++;
-                            else if (*p == '}') depth--;
+                            else if (*p == '}') {
+                                depth--;
+                                if (depth == 0) {
+                                    obj_end = p;
+                                    break;
+                                }
+                            }
                             p++;
                         }
-                        if (depth != 0) break;
-                        const char* obj_end = p - 1;
+                        
+                        if (!obj_end) break;
+                        
                         size_t obj_len = (size_t)(obj_end - obj_start + 1);
-                        char single_obj_json[512];
+                        char single_obj_json[1024]; // Increased size just in case
                         if (obj_len >= sizeof(single_obj_json)) obj_len = sizeof(single_obj_json) - 1;
                         strncpy(single_obj_json, obj_start, obj_len);
                         single_obj_json[obj_len] = '\0';
 
+                        class_label[0] = '\0'; 
                         if (get_json_string(single_obj_json, "class_label", class_label, sizeof(class_label)) != 0)
                             get_json_string(single_obj_json, "class", class_label, sizeof(class_label));
+                        
                         if (class_label[0] != '\0') {
-                            /* Strip " - ..." suffix if present (server may send "Number 4 - 4") */
                             char* dash = strstr(class_label, " - ");
                             if (dash) *dash = '\0';
+                            
                             int img_id = -1;
-                            if (get_json_int(single_obj_json, "img_id", &img_id) != 0 || img_id < 0)
+                            if (get_json_int(single_obj_json, "img_id", &img_id) != 0 || img_id < 0) {
                                 img_id = get_img_id_from_class_name(class_label);
+                            }
+                            
                             if (img_id >= 0) {
-                                /* Send TARGET,object_id,img_id to Android (e.g. "TARGET,1,11") */
-                                send_target_result_to_android(context->android_fd, task_args->obstacle_id, img_id);
-                                printf("[ImgThread] Sent image detection result to Android: obstacle_id=%d, class_label=%s, img_id=%d\n", task_args->obstacle_id, class_label, img_id);
+                                // Find actual obstacle coordinates and direction for Android feedback
+                                int obs_x = -1;
+                                int obs_y = -1;
+                                int obs_d = -1;
+                                
+                                pthread_mutex_lock(&context->lock);
+                                for (int i = 0; i < context->obstacle_count; i++) {
+                                    if (context->obstacles[i].id == task_args->obstacle_id) {
+                                        obs_x = context->obstacles[i].x;
+                                        obs_y = context->obstacles[i].y;
+                                        obs_d = context->obstacles[i].d;
+                                        break;
+                                    }
+                                }
+                                pthread_mutex_unlock(&context->lock);
+
+                                // Fallback to robot snap position if obstacle not found (though it should be in context)
+                                if (obs_x == -1) {
+                                    obs_x = task_args->robot_snap_position.x;
+                                    obs_y = task_args->robot_snap_position.y;
+                                    obs_d = task_args->robot_snap_position.d;
+                                }
+
+                                const char* dir_str = (obs_d >= 0 && obs_d < 8) ?
+                                                       DIR_MAP_ANDROID_STR[obs_d] : "U";
+                                
+                                printf("[ImgThread] Forwarding detection to Android: obstacle_id=%d, class=%s, img_id=%d, pos=(%d,%d), d=%s\n", 
+                                       task_args->obstacle_id, class_label, img_id, obs_x, obs_y, dir_str);
+
+                                send_image_recognition_to_android(context->android_write_fd, 
+                                                                  obs_x, 
+                                                                  obs_y, 
+                                                                  dir_str, 
+                                                                  img_id, 
+                                                                  task_args->obstacle_id);
                                 sent = 1;
-                            } else {
-                                fprintf(stderr, "[ImgThread] Unknown class label received or invalid img_id: %s\n", class_label);
                             }
                         }
-                        ptr = p;
+                        ptr = obj_end + 1;
                     }
                     if (sent == 0)
-                        fprintf(stderr, "[ImgThread] No valid object with img_id for obstacle %d.\n", task_args->obstacle_id);
+                        fprintf(stderr, "[ImgThread] No valid object with img_id found in 'objects' array for obstacle %d.\n", task_args->obstacle_id);
+                } else {
+                    fprintf(stderr, "[ImgThread] Failed to find 'objects' array in server response for obstacle %d.\n", task_args->obstacle_id);
                 }
             }
         } else {
             fprintf(stderr, "[ImgThread] Failed to upload image or no ACK received from image server.\n");
+            send_android_ack(context->android_write_fd, "Failed to capture image for obstacle");
         }
     }
     free(task_args); // Free the dynamically allocated arguments
@@ -209,6 +307,19 @@ void execute_navigation() {
     SharedAppContext* context = &g_app_context;
     printf("[NavThread] State: [NAVIGATING]. Executing %d commands.\n", context->command_count);
 
+    // Clear serial buffers (both read and write) to ensure we start clean
+    flush_serial_port(context->stm32_fd);
+    flush_serial_port(g_stm32_ack_fd); // Flush the ACK read channel
+    flush_serial_port(context->android_write_fd);
+
+    // Reset ACK state before starting
+    pthread_mutex_lock(&context->stm32_ack_mutex);
+    context->stm32_last_ack_id = 0;
+    pthread_mutex_unlock(&context->stm32_ack_mutex);
+
+    // Tell Android we are starting
+    send_android_ack(context->android_write_fd, "ready-to-roll");
+
     pthread_mutex_lock(&context->lock);
     context->snap_position_idx = 0; // Reset snap position index for new navigation
     pthread_mutex_unlock(&context->lock);
@@ -217,6 +328,14 @@ void execute_navigation() {
 
     for (int i = 0; i < context->command_count; i++) {
         pthread_mutex_lock(&context->lock);
+        // Time-based auto-stop: 5 minutes 30 seconds limit
+        time_t now;
+        time(&now);
+        if (difftime(now, context->mission_start_time) > 330) {
+            printf("[NavThread] 5:30 mission limit reached! Stopping robot now.\n");
+            context->stop_requested = true;
+        }
+
         if (context->stop_requested) {
             printf("[NavThread] Stop requested. Aborting navigation.\n");
             context->stop_requested = false;
@@ -228,6 +347,7 @@ void execute_navigation() {
 
         Command cmd = context->commands[i];
         if (cmd.type == CMD_SNAPSHOT) {
+            // ... (Snapshot logic remains the same)
             printf("[NavThread] --- Spawning image thread for obstacle %d ---\n", cmd.value);
             pthread_t tid;
             ImageTaskArgs* args = malloc(sizeof(ImageTaskArgs));
@@ -291,17 +411,19 @@ void execute_navigation() {
                 pthread_mutex_unlock(&context->lock);
                 break; // Exit the command execution loop
             }
-
-
+        } else if (cmd.type == CMD_FINISH) {
+            printf("[NavThread] Received FINISH command. Ending navigation.\n");
+            break; // Exit the command execution loop
         } else {
             // Send command to STM32 with a sequential ID
             uint32_t sent_cmd_id = current_cmd_id++; // Store the ID we're sending
             send_command_to_stm32(context->stm32_fd, cmd, sent_cmd_id);
-            printf("[NavThread] Sent command %u to STM32. Waiting for ACK...\n", sent_cmd_id);
+            printf("[NavThread] Sent command %u (Type: %d, Val: %d) to STM32. Waiting for ACK...\n", 
+                   sent_cmd_id, cmd.type, cmd.value);
 
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += 10; // Wait for up to 5 seconds for ACK
+            ts.tv_sec += 15; // Increased to 15 seconds for robust ACK waiting
 
             int ack_result = 0; // 0 for success, -1 for error/timeout
             pthread_mutex_lock(&context->stm32_ack_mutex);
@@ -320,6 +442,18 @@ void execute_navigation() {
 
             if (ack_result == 0 && context->stm32_last_ack_id == sent_cmd_id) {
                 printf("[NavThread] Received ACK for command %u.\n", sent_cmd_id);
+                
+                // Notify Android that the command is complete so the car moves on the UI
+                char status_msg[100];
+                const char* type_str = "FW";
+                if (cmd.type == CMD_MOVE_BACKWARD) type_str = "BW";
+                else if (cmd.type == CMD_TURN_LEFT) type_str = "FL";
+                else if (cmd.type == CMD_TURN_RIGHT) type_str = "FR";
+                else if (cmd.type == CMD_REVERSE_LEFT) type_str = "BL";
+                else if (cmd.type == CMD_REVERSE_RIGHT) type_str = "BR";
+                
+                snprintf(status_msg, sizeof(status_msg), "STM completed %s%d", type_str, cmd.value);
+                send_android_ack(context->android_write_fd, status_msg);
             }
             pthread_mutex_unlock(&context->stm32_ack_mutex);
 
@@ -333,8 +467,206 @@ void execute_navigation() {
             }
         }
     } // End of for loop
-    // Using send_message_to_android_with_ack for navigation completion status
-    send_message_to_android_with_ack(context->android_fd, "\"Navigation complete.\"\n");
+    // Using send_android_ack for navigation completion status
+    send_android_ack(context->android_write_fd, "all-images-scan");
+}
+
+// Helper for Task 2 image detection
+static int perform_task2_detection(SharedAppContext* context, int obstacle_num) {
+    char image_server_response[2048];
+    int arrow_dir = 0; // 1 for Left, 2 for Right, 0 for None
+    int attempts = 0;
+    const int MAX_ATTEMPTS = 5;
+
+    while (attempts < MAX_ATTEMPTS && arrow_dir == 0) {
+        attempts++;
+        printf("[Task2] Attempt %d/%d: Capturing image for obstacle %d...\n", attempts, MAX_ATTEMPTS, obstacle_num);
+        
+        if (capture_image(CAPTURE_FILENAME) == 0) {
+            if (post_image_to_server_thread(obstacle_num, image_server_response, sizeof(image_server_response)) == 0) {
+                printf("[Task2] Attempt %d response: %s\n", attempts, image_server_response);
+                int count = 0;
+                if (get_json_int(image_server_response, "count", &count) == 0 && count > 0) {
+                     // Robustly search for Right Arrow (38) or Left Arrow (39) using JSON helpers
+                     int img_id = -1;
+                     char class_label[100] = {0};
+
+                     // Try getting img_id directly (handles whitespace after colon)
+                     if (get_json_int(image_server_response, "img_id", &img_id) == 0) {
+                         if (img_id == 39) arrow_dir = 1;
+                         else if (img_id == 38) arrow_dir = 2;
+                     }
+
+                     // Fallback to class_label if img_id didn't match or wasn't found
+                     if (arrow_dir == 0 && (get_json_string(image_server_response, "class_label", class_label, sizeof(class_label)) == 0 ||
+                                          get_json_string(image_server_response, "class", class_label, sizeof(class_label)) == 0)) {
+                         if (strstr(class_label, "Left Arrow") != NULL) arrow_dir = 1;
+                         else if (strstr(class_label, "Right Arrow") != NULL) arrow_dir = 2;
+                     }
+
+                     if (arrow_dir == 1) {
+                         printf("[Task2] Detected LEFT arrow for obstacle %d on attempt %d\n", obstacle_num, attempts);
+                     } else if (arrow_dir == 2) {
+                         printf("[Task2] Detected RIGHT arrow for obstacle %d on attempt %d\n", obstacle_num, attempts);
+                     }
+                }
+            }
+        }
+
+        if (arrow_dir == 0 && attempts < MAX_ATTEMPTS) {
+            printf("[Task2] No arrow detected on attempt %d. Retrying in 0.5s...\n", attempts);
+            usleep(500000); // Wait 0.5 seconds before next attempt
+        }
+    }
+
+    if (arrow_dir > 0) {
+        char stm_cmd[64];
+        snprintf(stm_cmd, sizeof(stm_cmd), ":2/GENERAL/CAPTURE/%d/%d;", obstacle_num, arrow_dir);
+        write(context->stm32_fd, stm_cmd, strlen(stm_cmd));
+        printf("[To STM32]: %s\n", stm_cmd);
+        
+        char android_msg[128];
+        snprintf(android_msg, sizeof(android_msg), "Task 2 Obs %d: %s", obstacle_num, (arrow_dir == 1 ? "Left" : "Right"));
+        send_android_ack(context->android_write_fd, android_msg);
+        return 1;
+    } else {
+        printf("[Task2] FAILED to detect arrow for obstacle %d after %d attempts.\n", obstacle_num, MAX_ATTEMPTS);
+        send_android_ack(context->android_write_fd, "Error: Task 2 detection failed after 5 attempts.");
+        return 0;
+    }
+}
+
+// Send a LOCK trigger to the PC (stream_test.py listens on PC_LOCK_PORT).
+static int send_lock_trigger_to_pc(int obstacle_num) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("[Task2] socket()");
+        return -1;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)PC_LOCK_PORT);
+    addr.sin_addr.s_addr = inet_addr(PC_LOCK_HOST);
+
+    if (addr.sin_addr.s_addr == INADDR_NONE) {
+        fprintf(stderr, "[Task2] Invalid PC_LOCK_HOST: %s\n", PC_LOCK_HOST);
+        close(sockfd);
+        return -1;
+    }
+
+    if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        perror("[Task2] connect() to PC lock port failed");
+        close(sockfd);
+        return -1;
+    }
+
+    char msg[32];
+    snprintf(msg, sizeof(msg), "LOCK %d\n", obstacle_num);
+    if (send(sockfd, msg, strlen(msg), 0) < 0) {
+        perror("[Task2] send(LOCK) failed");
+        close(sockfd);
+        return -1;
+    }
+    close(sockfd);
+    printf("[Task2] Sent trigger to PC: %s", msg);
+    return 0;
+}
+
+// Wait for the livestream RESULT (img_id) for this obstacle, then send the STM capture command.
+static int perform_task2_detection_livestream(SharedAppContext* context, int obstacle_num) {
+    // 1) Ask the PC to commit the latest stable arrow for this obstacle.
+    if (send_lock_trigger_to_pc(obstacle_num) != 0) {
+        send_android_ack(context->android_write_fd, "Task 2: Failed to trigger PC lock.");
+        return 0;
+    }
+
+    // 2) Wait for RESULT forwarded by stream_server.py -> localhost UDP -> this process.
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 10; // wait up to 10 seconds for PC to respond
+
+    int img_id = -1;
+    pthread_mutex_lock(&g_task2_result_mutex);
+    while (!g_task2_result_ready[obstacle_num] && !context->stop_requested) {
+        int rc = pthread_cond_timedwait(&g_task2_result_cond, &g_task2_result_mutex, &ts);
+        if (rc == ETIMEDOUT) {
+            fprintf(stderr, "[Task2] Timeout waiting for livestream RESULT for obstacle %d.\n", obstacle_num);
+            pthread_mutex_unlock(&g_task2_result_mutex);
+            send_android_ack(context->android_write_fd, "Task 2: Timeout waiting for PC detection.");
+            return 0;
+        }
+    }
+    img_id = g_task2_result_img_id[obstacle_num];
+    g_task2_result_ready[obstacle_num] = 0;
+    pthread_mutex_unlock(&g_task2_result_mutex);
+
+    int arrow_dir = 0;
+    if (img_id == 39) arrow_dir = 1;       // Left Arrow
+    else if (img_id == 38) arrow_dir = 2;  // Right Arrow
+
+    if (arrow_dir == 0) {
+        fprintf(stderr, "[Task2] Invalid img_id from livestream for obstacle %d: %d\n", obstacle_num, img_id);
+        send_android_ack(context->android_write_fd, "Task 2: Invalid detection result (img_id).");
+        return 0;
+    }
+
+    char stm_cmd[64];
+    snprintf(stm_cmd, sizeof(stm_cmd), ":2/GENERAL/CAPTURE/%d/%d;", obstacle_num, arrow_dir);
+    write(context->stm32_fd, stm_cmd, strlen(stm_cmd));
+    printf("[To STM32]: %s\n", stm_cmd);
+    arrow_dir = 0;
+
+    char android_msg[128];
+    snprintf(android_msg, sizeof(android_msg), "Task 2 Obs %d: %s", obstacle_num, (arrow_dir == 1 ? "Left" : "Right"));
+    send_android_ack(context->android_write_fd, android_msg);
+    return 1;
+}
+
+void execute_task2() {
+    SharedAppContext* context = &g_app_context;
+    printf("[NavThread] State: [TASK2]. Waiting for STM signals.\n");
+
+    for (int obs = 1; obs <= 2; obs++) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 120; // Increased to 120 seconds (2 minutes) for STM to reach obstacle
+
+        pthread_mutex_lock(&context->task2_snap_mutex);
+        while (context->task2_snap_obs_id != obs && !context->stop_requested) {
+            int rc = pthread_cond_timedwait(&context->task2_snap_cond, &context->task2_snap_mutex, &ts);
+            if (rc == ETIMEDOUT) {
+                fprintf(stderr, "[NavThread] Task 2: Timeout waiting for snapshot signal !CAPTURE%d from STM32.\n", obs);
+                break;
+            }
+        }
+        
+        if (context->stop_requested) {
+            pthread_mutex_unlock(&context->task2_snap_mutex);
+            break;
+        }
+
+        if (context->task2_snap_obs_id == obs) {
+            context->task2_snap_obs_id = 0; // Reset for next obstacle
+            pthread_mutex_unlock(&context->task2_snap_mutex);
+            
+#if USE_LIVESTREAM_TASK2
+            if (perform_task2_detection_livestream(context, obs) == 0) {
+#else
+            if (perform_task2_detection(context, obs) == 0) {
+#endif
+                printf("[NavThread] Task 2: Aborting due to detection failure.\n");
+                break; // Exit the loop on total failure
+            }
+        } else {
+            pthread_mutex_unlock(&context->task2_snap_mutex);
+            break; 
+        }
+    }
+
+    send_android_ack(context->android_write_fd, "Task 2 completed.");
+    printf("[NavThread] Task 2 Finished.\n");
 }
 
 void* navigation_executor_thread(void* args) {
@@ -342,10 +674,12 @@ void* navigation_executor_thread(void* args) {
 
     while (1) {
         pthread_mutex_lock(&context->lock);
-        while (!context->new_map_received && !context->stop_requested) {
+        while (!context->new_map_received && !context->task2_requested && !context->stop_requested) {
             printf("[NavThread] State: [IDLE]. Waiting for new mission...\n");
             pthread_cond_wait(&context->new_task_cond, &context->lock);
         }
+        printf("[NavThread] Woke up! new_map_received=%d, task2_requested=%d, stop_requested=%d\n", 
+               context->new_map_received, context->task2_requested, context->stop_requested);
 
         if (context->stop_requested) {
             context->state = STATE_IDLE;
@@ -355,28 +689,36 @@ void* navigation_executor_thread(void* args) {
         if (context->new_map_received) {
             context->state = STATE_PATHFINDING;
             context->new_map_received = false;
+            time(&context->mission_start_time); // Record start time for time-based auto-stop
+        } else if (context->task2_requested) {
+            context->state = STATE_TASK2;
+            context->task2_requested = false;
         }
         pthread_mutex_unlock(&context->lock);
 
         if (context->state == STATE_PATHFINDING) {
+            // ... (existing pathfinding logic)
             printf("[NavThread] State: [PATHFINDING]. Requesting route from server...\n");
             char payload[2048];
             char obstacles_str[1500] = ""; // To build the obstacles array string
 
+            bool first_obs = true;
             for (int i = 0; i < context->obstacle_count; i++) {
+                if (context->obstacles[i].id == 0) continue; // Skip ID 0 as requested
                 char obs_item[100]; // Buffer for a single obstacle JSON object
+                if (!first_obs) strcat(obstacles_str, ",");
                 // Obstacle x, y are 0-indexed internally, server expects 0-indexed
                 // Direction 'd' is integer, server expects integer
                 snprintf(obs_item, sizeof(obs_item), "{\"id\":%d,\"x\":%d,\"y\":%d,\"d\":%d}",
                          context->obstacles[i].id, context->obstacles[i].x, context->obstacles[i].y, context->obstacles[i].d);
                 strcat(obstacles_str, obs_item);
-                if (i < context->obstacle_count - 1) strcat(obstacles_str, ",");
+                first_obs = false;
             }
 
             // Construct the full payload including robot initial state and retrying flag
             snprintf(payload, sizeof(payload), "{\"obstacles\":[%s],\"robot_x\":%d,\"robot_y\":%d,\"robot_dir\":%d,\"retrying\":false}",
                      obstacles_str, context->robot_start_x, context->robot_start_y, context->robot_start_dir);
-            printf("[NavThread] Pathfinding payload: %s\n", payload);
+            printf("[NavThread] Forwarding arena data to pathfinding server: %s\n", payload);
 
             char response[4096]; // Increased response buffer size
             if (post_data_to_server(PATHFINDING_SERVER_URL, payload, response, sizeof(response)) == 0) {
@@ -386,14 +728,16 @@ void* navigation_executor_thread(void* args) {
                 // Call the modified parse_command_route_from_server
                 if (parse_command_route_from_server(response, context->commands, &context->command_count,
                                                     context->snap_positions, &context->snap_position_count) == 0) {
-                    send_message_to_android_with_ack(context->android_fd, "\"Route calculated. Navigating.\"\n"); // Using ack send
+                    send_android_ack(context->android_write_fd, "Route calculated. Navigating."); // Using ack send
                     execute_navigation();
                 } else {
-                    send_message_to_android_with_ack(context->android_fd, "\"Error: Pathfinding failed to parse route.\"\n"); // Using ack send
+                    send_android_ack(context->android_write_fd, "Error: Pathfinding failed to parse route."); // Using ack send
                 }
             } else {
-                send_message_to_android_with_ack(context->android_fd, "\"Error: Pathfinding server communication failed.\"\n"); // Using ack send
+                send_android_ack(context->android_write_fd, "Error: Pathfinding server communication failed."); // Using ack send
             }
+        } else if (context->state == STATE_TASK2) {
+            execute_task2();
         }
 
         pthread_mutex_lock(&context->lock);
@@ -410,78 +754,188 @@ void* navigation_executor_thread(void* args) {
             
             void* android_listener_thread(void* args) {
                 SharedAppContext* context = (SharedAppContext*)args;
-                char buffer[8192]; // Buffer for incoming Android messages
+                char buffer[8192];      // Temporary read buffer
+                char main_buffer[16384]; // Persistent accumulation buffer
+                int buffer_pos = 0;
             
+                printf("[AndroidThread] Started listening for messages.\n");
                 while (1) {
-                    printf("[AndroidThread] Listening for messages...\n");
-                    // Blocking read until a message is received
                     ssize_t bytes_read = read(context->android_fd, buffer, sizeof(buffer) - 1);
             
                     if (bytes_read > 0) {
                         buffer[bytes_read] = '\0';
-                        printf("[AndroidThread] Received: %s\n", buffer);
+                        printf("[AndroidThread] Incoming data (%zd bytes): %s\n", bytes_read, buffer);
+
+                        // Append new data to main buffer
+                        if (buffer_pos + bytes_read >= (ssize_t)sizeof(main_buffer)) {
+                            fprintf(stderr, "[AndroidThread] Buffer full. Clearing to recover.\n");
+                            buffer_pos = 0;
+                        }
+                        memcpy(main_buffer + buffer_pos, buffer, bytes_read);
+                        buffer_pos += bytes_read;
+                        main_buffer[buffer_pos] = '\0';
             
-                        // Check for JSON message first
-                        char category[50];
-                        if (get_json_string(buffer, "cat", category, sizeof(category)) == 0) {
-                            if (strcmp(category, "sendArena") == 0) {
-                                const char* value_ptr = strstr(buffer, "\"value\":");
-                                if (value_ptr) {
-                                    const char* map_json_start = strchr(value_ptr, '{');
-                                    if (map_json_start) {
-                                        pthread_mutex_lock(&context->lock);
-                                        if (context->state == STATE_IDLE) {
-                                            if (parse_android_map_and_obstacles(map_json_start, context) == 0) {
-                                                context->new_map_received = true;
-                                                send_android_ack(context->android_fd, category, "Map received. Pathfinding...");
-                                                pthread_cond_signal(&context->new_task_cond);
-                                            } else {
-                                                send_android_ack(context->android_fd, category, "Error: Invalid map format.");
-                                            }
-                                        } else {
-                                            send_android_ack(context->android_fd, category, "Error: Robot is busy. Cannot start new mission.");
-                                        }
-                                        pthread_mutex_unlock(&context->lock);
-                                    } else {
-                                        fprintf(stderr, "[AndroidThread] Malformed 'sendArena': 'value' object not found.\n");
-                                        send_android_ack(context->android_fd, category, "Error: Malformed 'sendArena' message.");
-                                    }
-                                } else {
-                                    fprintf(stderr, "[AndroidThread] Malformed 'sendArena': 'value' key not found.\n");
-                                    send_android_ack(context->android_fd, category, "Error: Malformed 'sendArena' message.");
+                        // Self-healing: If we have multiple "{"cat":" in the buffer, 
+                        // it means we might have a stuck partial message at the front.
+                        char* first_msg = strstr(main_buffer, "{\"cat\":");
+                        if (first_msg) {
+                            char* second_msg = strstr(first_msg + 1, "{\"cat\":");
+                            if (second_msg) {
+                                // Check if the first one is actually incomplete (no matching })
+                                // by seeing if there's a } before the second_msg starts
+                                bool has_closing = false;
+                                for (char* t = first_msg; t < second_msg; t++) {
+                                    if (*t == '}') { has_closing = true; break; }
                                 }
-                            } else if (strcmp(category, "stop") == 0) { // STOP command as JSON
-                                pthread_mutex_lock(&context->lock);
-                                send_android_ack(context->android_fd, category, "STOP command received.");
-                                context->stop_requested = true;
-                                if(context->state != STATE_IDLE) {
-                                    pthread_cond_signal(&context->new_task_cond);
+                                
+                                if (!has_closing) {
+                                    printf("[AndroidThread] Detected stuck partial message. Discarding junk at front.\n");
+                                    int skip = second_msg - main_buffer;
+                                    memmove(main_buffer, second_msg, buffer_pos - skip);
+                                    buffer_pos -= skip;
+                                    main_buffer[buffer_pos] = '\0';
                                 }
-                                pthread_mutex_unlock(&context->lock);
-                            } else if (strcmp(category, "stm") == 0) { // Direct STM command from Android
-                                char stm_command_str[100]; // Buffer for the command string like "<FR090>"
-                                if (get_json_string(buffer, "value", stm_command_str, sizeof(stm_command_str)) == 0) {
-                                    // Parse and execute the STM command. This function will be in rpi_hal.c
-                                    // It will also handle waiting for ACK from STM32
-                                    parse_and_execute_android_command(context->stm32_fd, stm_command_str, context);
-                                } else {
-                                    fprintf(stderr, "[AndroidThread] Malformed 'stm' command: 'value' key not found.\n");
-                                    send_android_ack(context->android_fd, category, "Error: Malformed STM command.");
-                                }
-                            } else {
-                                fprintf(stderr, "[AndroidThread] Unrecognized JSON category from Android: %s\n", category);
                             }
                         }
-                        // All other messages are considered malformed or unrecognized by AndroidThread
-                        else {
-                            fprintf(stderr, "[AndroidThread] Malformed or unrecognized message from Android: %s\n", buffer);
+
+                        // Process all complete JSON messages
+                        char* msg_start;
+                        while ((msg_start = strchr(main_buffer, '{')) != NULL) {
+                            int depth = 0;
+                            char* p = msg_start;
+                            char* msg_end = NULL;
+                            bool in_string = false;
+
+                            while (*p) {
+                                if (*p == '"' && (p == msg_start || *(p-1) != '\\')) {
+                                    in_string = !in_string;
+                                } else if (!in_string) {
+                                    if (*p == '{') depth++;
+                                    else if (*p == '}') {
+                                        depth--;
+                                        if (depth == 0) {
+                                            msg_end = p;
+                                            break;
+                                        }
+                                    }
+                                }
+                                p++;
+                            }
+
+                            if (msg_end == NULL) {
+                                // Incomplete message, wait for more data
+                                break;
+                            }
+
+                            // We have a complete message from msg_start to msg_end
+                            size_t msg_len = msg_end - msg_start + 1;
+                            char current_msg[8192]; 
+                            if (msg_len >= sizeof(current_msg)) msg_len = sizeof(current_msg) - 1;
+                            memcpy(current_msg, msg_start, msg_len);
+                            current_msg[msg_len] = '\0';
+
+                            printf("[AndroidThread] Processing complete JSON: %s\n", current_msg);
+            
+                                // Check for JSON message first
+                                char category[50];
+                                if (get_json_string(current_msg, "cat", category, sizeof(category)) == 0) {
+                                    if (strcmp(category, "sendArena") == 0) {
+                                        const char* value_ptr = strstr(current_msg, "\"value\":");
+                                        if (value_ptr) {
+                                            const char* map_json_start = strchr(value_ptr, '{');
+                                            if (map_json_start) {
+                                                pthread_mutex_lock(&context->lock);
+                                                if (context->state == STATE_IDLE) {
+                                                    if (parse_android_map_and_obstacles(map_json_start, context) == 0) {
+                                                        context->new_map_received = true;
+                                                        printf("[AndroidThread] Valid mission received. Obstacles: %d. Signalling NavThread.\n", context->obstacle_count);
+                                                        send_android_ack(context->android_write_fd, "Map received. Pathfinding...");
+                                                        pthread_cond_signal(&context->new_task_cond);
+                                                    } else {
+                                                        send_android_ack(context->android_write_fd, "Error: Invalid map format.");
+                                                    }
+                                                } else {
+                                                    send_android_ack(context->android_write_fd, "Error: Robot is busy. Cannot start new mission.");
+                                                }
+                                                pthread_mutex_unlock(&context->lock);
+                                            } else {
+                                                fprintf(stderr, "[AndroidThread] Malformed 'sendArena': 'value' object not found.\n");
+                                                send_android_ack(context->android_write_fd, "Error: Malformed 'sendArena' message.");
+                                            }
+                                        } else {
+                                            fprintf(stderr, "[AndroidThread] Malformed 'sendArena': 'value' key not found.\n");
+                                            send_android_ack(context->android_write_fd, "Error: Malformed 'sendArena' message.");
+                                        }
+                                    } else if (strcmp(category, "stop") == 0) { // STOP command as JSON
+                                        pthread_mutex_lock(&context->lock);
+                                        send_android_ack(context->android_write_fd, "STOP command received.");
+                                        context->stop_requested = true;
+                                        // Flush STM32 port to clear pending commands
+                                        flush_serial_port(context->stm32_fd);
+                                        if(context->state != STATE_IDLE) {
+                                            pthread_cond_signal(&context->new_task_cond);
+                                        }
+                                        pthread_mutex_unlock(&context->lock);
+                                    } else if (strcmp(category, "task2") == 0) { // New Task 2 command
+                                        pthread_mutex_lock(&context->lock);
+                                        if (context->state == STATE_IDLE) {
+                                            context->state = STATE_TASK2;
+                                            context->task2_requested = true;
+                                            printf("[AndroidThread] Task 2 mission received. Signalling NavThread.\n");
+                                            
+                                            // Send initialization command to STM32 for Task 2
+                                            char task2_init_cmd[64];
+                                            snprintf(task2_init_cmd, sizeof(task2_init_cmd), ":1/MOTOR/TASK2/1/1;");
+                                            write(context->stm32_fd, task2_init_cmd, strlen(task2_init_cmd));
+                                            printf("[To STM32]: %s\n", task2_init_cmd);
+
+                                            send_android_ack(context->android_write_fd, "Task 2 started.");
+                                            pthread_cond_signal(&context->new_task_cond);
+                                        } else {
+                                            send_android_ack(context->android_write_fd, "Error: Robot busy, cannot start Task 2.");
+                                        }
+                                        pthread_mutex_unlock(&context->lock);
+                                    } else if (strcmp(category, "stm") == 0) { // Direct STM command from Android
+                                        char stm_command_str[100]; // Buffer for the command string like "<FR090>"
+                                        if (get_json_string(current_msg, "value", stm_command_str, sizeof(stm_command_str)) == 0) {
+                                            parse_and_execute_android_command(context->stm32_fd, stm_command_str, context);
+                                        } else {
+                                            fprintf(stderr, "[AndroidThread] Malformed 'stm' command: 'value' key not found.\n");
+                                            send_android_ack(context->android_write_fd, "Error: Malformed STM command.");
+                                        }
+                                    } else {
+                                        fprintf(stderr, "[AndroidThread] Unrecognized JSON category: %s\n", category);
+                                    }
+                                } else {
+                                    fprintf(stderr, "[AndroidThread] Malformed or unrecognized message: %s\n", current_msg);
+                                }
+
+                            // Shift remaining data to the front
+                            // Also consume any trailing whitespace/newlines after the JSON object
+                            char* next_ptr = msg_end + 1;
+                            while (*next_ptr && (isspace((unsigned char)*next_ptr) || *next_ptr == '\n' || *next_ptr == '\r')) {
+                                next_ptr++;
+                            }
+
+                            int consumed = next_ptr - main_buffer;
+                            int remaining = buffer_pos - consumed;
+                            if (remaining > 0) {
+                                memmove(main_buffer, next_ptr, remaining);
+                                buffer_pos = remaining;
+                                main_buffer[buffer_pos] = '\0';
+                            } else {
+                                buffer_pos = 0;
+                                main_buffer[0] = '\0';
+                            }
                         }
                     } else if (bytes_read == 0) {
-                        printf("[AndroidThread] Read 0 bytes, serial port might be closed or empty.\n");
-                        usleep(10000); // Small delay to prevent busy-waiting
+                        usleep(10000);
                     } else {
-                        perror("[AndroidThread] Error reading from serial port");
-                        usleep(100000); // 100ms
+                        // Avoid spamming perror if it's just no data available in non-blocking mode
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            perror("[AndroidThread] Error reading from serial port");
+                        }
+                        usleep(10000);
                     }
                 }
                 return NULL;
@@ -493,46 +947,145 @@ void* navigation_executor_thread(void* args) {
             // =================================================================================
             void* stm32_listener_thread(void* args) {
                 SharedAppContext* context = (SharedAppContext*)args;
-                char buffer[256]; // Buffer for incoming STM32 messages
-                ssize_t bytes_read;
+                char buffer[256];      // Temporary read buffer
+                char main_buffer[512]; // Persistent accumulation buffer
+                int buffer_pos = 0;
             
-                printf("[STM32Thread] Listening for messages...\n");
+                printf("[STM32Thread] Started listening for messages.\n");
             
                 while (1) {
-                    #ifdef RPI_TESTING
-                        // In test mode, read from the dedicated ACK pipe.
-                        bytes_read = read(g_stm32_ack_fd, buffer, sizeof(buffer) - 1);
-                    #else
-                        // In normal mode, read from the bidirectional serial port.
-                        bytes_read = read(context->stm32_fd, buffer, sizeof(buffer) - 1);
-                    #endif
+                    ssize_t bytes_read = read(g_stm32_ack_fd, buffer, sizeof(buffer) - 1);
             
-                    if (bytes_read > 0) {
-                        buffer[bytes_read] = '\0';
-                        printf("[STM32Thread] Received: %s", buffer); // Use %s directly, as it might contain \n
+                                if (bytes_read > 0) {
+                                    buffer[bytes_read] = '\0';
+                                    printf("[STM32Thread] Incoming raw: %s\n", buffer);
+                    
+                                    // Append new data to main buffer
+                                    if (buffer_pos + bytes_read >= (ssize_t)sizeof(main_buffer)) {                            fprintf(stderr, "[STM32Thread] Buffer overflow. Clearing buffer.\n");
+                            buffer_pos = 0;
+                        }
+                        memcpy(main_buffer + buffer_pos, buffer, bytes_read);
+                        buffer_pos += bytes_read;
+                        main_buffer[buffer_pos] = '\0';
             
-                        // Check for ACK message format: !cmdId/DONE;
-                        uint32_t cmd_id;
-                        // Assuming the format is !<cmdId>/DONE;
-                        if (sscanf(buffer, "!%u/DONE;", &cmd_id) == 1) {
-                            pthread_mutex_lock(&context->stm32_ack_mutex);
-                            context->stm32_last_ack_id = cmd_id;
-                            pthread_cond_signal(&context->stm32_ack_cond);
-                            pthread_mutex_unlock(&context->stm32_ack_mutex);
-                            printf("[STM32Thread] Processed ACK for CMD ID: %u\n", cmd_id);
-                        } else {
-                            fprintf(stderr, "[STM32Thread] Unrecognized message format from STM32: %s\n", buffer);
+                        // Process all complete messages (delimited by ;)
+                        char* semicolon_pos;
+                        while ((semicolon_pos = strchr(main_buffer, ';')) != NULL) {
+                            size_t msg_len = (semicolon_pos - main_buffer) + 1;
+                            char current_msg[256];
+                            if (msg_len >= sizeof(current_msg)) msg_len = sizeof(current_msg) - 1;
+                            
+                            memcpy(current_msg, main_buffer, msg_len);
+                            current_msg[msg_len] = '\0';
+            
+                            printf("[STM32Thread] Message: %s\n", current_msg);
+            
+                            uint32_t cmd_id;
+                            if (sscanf(current_msg, " !%u/DONE;", &cmd_id) == 1 || sscanf(current_msg, "!%u/DONE;", &cmd_id) == 1) {
+                                pthread_mutex_lock(&context->stm32_ack_mutex);
+                                context->stm32_last_ack_id = cmd_id;
+                                pthread_cond_signal(&context->stm32_ack_cond);
+                                pthread_mutex_unlock(&context->stm32_ack_mutex);
+                                printf("[STM32Thread] ACK confirmed for ID: %u\n", cmd_id);
+                            } else if (strstr(current_msg, "!CAPTURE1;") != NULL) {
+                                printf("[STM32Thread] Snapshot request 1 received from STM32.\n");
+                                pthread_mutex_lock(&context->task2_snap_mutex);
+                                context->task2_snap_obs_id = 1;
+                                pthread_cond_signal(&context->task2_snap_cond);
+                                pthread_mutex_unlock(&context->task2_snap_mutex);
+                            } else if (strstr(current_msg, "!CAPTURE2;") != NULL) {
+                                printf("[STM32Thread] Snapshot request 2 received from STM32.\n");
+                                pthread_mutex_lock(&context->task2_snap_mutex);
+                                context->task2_snap_obs_id = 2;
+                                pthread_cond_signal(&context->task2_snap_cond);
+                                pthread_mutex_unlock(&context->task2_snap_mutex);
+                            }
+            
+                            // Shift remaining data to the front
+                            int remaining = buffer_pos - msg_len;
+                            if (remaining > 0) {
+                                memmove(main_buffer, main_buffer + msg_len, remaining);
+                                buffer_pos = remaining;
+                                main_buffer[buffer_pos] = '\0';
+                            } else {
+                                buffer_pos = 0;
+                                main_buffer[0] = '\0';
+                            }
                         }
                     } else if (bytes_read == 0) {
-                        // No data for a while, small delay to prevent busy-waiting
-                        usleep(10000); // 10ms
+                        usleep(10000);
                     } else {
-                        perror("[STM32Thread] Error reading from serial port");
-                        usleep(100000); // 100ms delay on error
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            perror("[STM32Thread] Error reading from serial port");
+                        }
+                        usleep(10000);
                     }
                 }
                 return NULL;
             }
+
+// =================================================================================
+// New THREAD: Livestream RESULT listener (UDP from stream_server.py)
+// =================================================================================
+static void* livestream_result_listener_thread(void* args) {
+    (void)args;
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        perror("[LiveResult] socket()");
+        return NULL;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)RESULT_UDP_PORT);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 127.0.0.1 only
+
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        perror("[LiveResult] bind()");
+        close(sockfd);
+        return NULL;
+    }
+
+    printf("[LiveResult] Listening on 127.0.0.1:%d for RESULT JSON.\n", RESULT_UDP_PORT);
+
+    char buf[4096];
+    while (1) {
+        ssize_t n = recv(sockfd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0) {
+            usleep(10000);
+            continue;
+        }
+        buf[n] = '\0';
+
+        int img_id = -1;
+        char obj_str[32] = {0};
+        int obstacle_num = 0;
+
+        // object_id is a string in our payload; parse it and img_id.
+        if (get_json_string(buf, "object_id", obj_str, sizeof(obj_str)) == 0) {
+            obstacle_num = atoi(obj_str);
+        }
+        // get_json_int finds first "img_id" occurrence (works for our payload)
+        (void)get_json_int(buf, "img_id", &img_id);
+
+        if (obstacle_num < 1 || obstacle_num > 2 || img_id < 0) {
+            printf("[LiveResult] Ignored payload (bad object_id/img_id). obj=%d img_id=%d\n", obstacle_num, img_id);
+            continue;
+        }
+
+        pthread_mutex_lock(&g_task2_result_mutex);
+        g_task2_result_img_id[obstacle_num] = img_id;
+        g_task2_result_ready[obstacle_num] = 1;
+        pthread_cond_broadcast(&g_task2_result_cond);
+        pthread_mutex_unlock(&g_task2_result_mutex);
+
+        printf("[LiveResult] Stored RESULT for obs %d: img_id=%d\n", obstacle_num, img_id);
+    }
+    // unreachable
+    // close(sockfd);
+    // return NULL;
+}
             
             
             // =================================================================================
@@ -544,6 +1097,12 @@ void* navigation_executor_thread(void* args) {
 // =================================================================================
 
 int main() {
+    // Register signal handler for clean exit on Ctrl+C
+    signal(SIGINT, handle_sigint);
+
+    // Disable stdout buffering to ensure logs are printed immediately from all threads
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     curl_global_init(CURL_GLOBAL_ALL); // Initialize curl once for the application lifecycle
     memset(&g_app_context, 0, sizeof(SharedAppContext));
     pthread_mutex_init(&g_app_context.lock, NULL);
@@ -562,27 +1121,43 @@ int main() {
     pthread_mutex_init(&g_app_context.image_capture_mutex, NULL);
     pthread_cond_init(&g_app_context.image_capture_cond, NULL);
 
+    // Initialize Task 2 synchronization mechanisms
+    g_app_context.task2_requested = false;
+    g_app_context.task2_snap_obs_id = 0;
+    pthread_mutex_init(&g_app_context.task2_snap_mutex, NULL);
+    pthread_cond_init(&g_app_context.task2_snap_cond, NULL);
 
-    // Initialize serial ports / test pipes
-    g_app_context.android_fd = init_serial_port(ANDROID_DEVICE, BAUD_RATE);
 
-    #ifdef RPI_TESTING
-        printf("--- RPI_TESTING mode enabled ---\n");
-        // In test mode, use separate pipes for writing commands and reading ACKs.
-        g_app_context.stm32_fd = init_serial_port(STM32_DEVICE_WRITE, BAUD_RATE);
-        g_stm32_ack_fd = init_serial_port(STM32_DEVICE_READ, BAUD_RATE);
-        if (g_app_context.stm32_fd == -1 || g_stm32_ack_fd == -1 || g_app_context.android_fd == -1) {
-            fprintf(stderr, "Fatal: Failed to initialize serial ports/pipes. Exiting.\n");
-            return 1;
-        }
+    // Initialize Android Communication
+    #if ANDROID_SIM
+        printf("Android: Simulation Mode (Pipes)\n");
+        g_app_context.android_fd = init_serial_port(ANDROID_PIPE_READ, BAUD_RATE);
+        g_app_context.android_write_fd = init_serial_port(ANDROID_PIPE_WRITE, BAUD_RATE);
     #else
-        g_app_context.stm32_fd = init_serial_port(STM32_DEVICE, BAUD_RATE);
-        if (g_app_context.stm32_fd == -1 || g_app_context.android_fd == -1) {
-            fprintf(stderr, "Fatal: Failed to initialize serial ports. Exiting.\n");
-            return 1;
-        }
+        printf("Android: Hardware Mode (%s)\n", ANDROID_HW_DEVICE);
+        g_app_context.android_fd = init_serial_port(ANDROID_HW_DEVICE, BAUD_RATE);
+        g_app_context.android_write_fd = g_app_context.android_fd;
     #endif
 
+    // Initialize STM32 Communication
+    #if STM32_SIM
+        printf("STM32:   Simulation Mode (Pipes)\n");
+        g_app_context.stm32_fd = init_serial_port(STM32_PIPE_WRITE, BAUD_RATE);
+        g_stm32_ack_fd = init_serial_port(STM32_PIPE_READ, BAUD_RATE);
+    #else
+        printf("STM32:   Hardware Mode (%s)\n", STM32_HW_DEVICE);
+        g_app_context.stm32_fd = init_serial_port(STM32_HW_DEVICE, BAUD_RATE);
+        g_stm32_ack_fd = g_app_context.stm32_fd;
+    #endif
+
+    if (g_app_context.stm32_fd == -1 || g_stm32_ack_fd == -1 || g_app_context.android_fd == -1 || g_app_context.android_write_fd == -1) {
+        fprintf(stderr, "Fatal: Failed to initialize communication ports. Exiting.\n");
+        return 1;
+    }
+
+    // Perform initial flush to clear any stale data from previous runs (STM32 only)
+    flush_serial_port(g_app_context.stm32_fd);
+    if (g_stm32_ack_fd != g_app_context.stm32_fd) flush_serial_port(g_stm32_ack_fd);
 
     printf("--- RPi Control Centre Initialized ---\n");
 
@@ -590,10 +1165,16 @@ int main() {
     pthread_create(&android_tid, NULL, android_listener_thread, &g_app_context);
     pthread_create(&nav_tid, NULL, navigation_executor_thread, &g_app_context);
     pthread_create(&stm32_tid, NULL, stm32_listener_thread, &g_app_context); // Create the new STM32 listener thread
+    pthread_t live_tid;
+    pthread_create(&live_tid, NULL, livestream_result_listener_thread, NULL);
+
+    // Signal Android that we are ready
+    send_android_ack(g_app_context.android_write_fd, "RPi-Ready");
 
     pthread_join(android_tid, NULL);
     pthread_join(nav_tid, NULL);
     pthread_join(stm32_tid, NULL); // Join the new STM32 listener thread
+    pthread_join(live_tid, NULL);
 
     pthread_mutex_destroy(&g_app_context.lock);
     pthread_cond_destroy(&g_app_context.new_task_cond);
@@ -603,11 +1184,15 @@ int main() {
     pthread_cond_destroy(&g_app_context.image_capture_cond);   // Destroy image capture condition variable
     
     // Close file descriptors
-    #ifdef RPI_TESTING
-        if (g_stm32_ack_fd != -1) close(g_stm32_ack_fd);
-    #endif
-    if (g_app_context.stm32_fd != -1) close(g_app_context.stm32_fd);
+    if (g_stm32_ack_fd != -1) close(g_stm32_ack_fd);
+    if (g_app_context.stm32_fd != -1 && g_app_context.stm32_fd != g_stm32_ack_fd) {
+        close(g_app_context.stm32_fd);
+    }
+    
     if (g_app_context.android_fd != -1) close(g_app_context.android_fd);
+    if (g_app_context.android_write_fd != -1 && g_app_context.android_write_fd != g_app_context.android_fd) {
+        close(g_app_context.android_write_fd);
+    }
 
 
     curl_global_cleanup(); // Clean up curl once at application shutdown
@@ -616,127 +1201,70 @@ int main() {
 
 
 // =================================================================================
-// Testing Instructions (Without Hardware)
+// Testing Instructions (Simulation Mode)
 // =================================================================================
 /*
-To test `multithread_communication.c` without physical Android or STM32 hardware,
-but with the fake servers, follow these steps.
+To test the RPi Control Centre without physical hardware (Android/STM32), follow these steps.
+The simulation uses Named Pipes (FIFOs) for serial comms and the provided Python fake servers.
 
 **Prerequisites:**
-1.  Ensure you have `python3` installed.
-2.  Ensure you have `curl` development libraries installed (e.g., `libcurl4-openssl-dev` on Debian/Ubuntu).
-3.  Ensure `json_parser.c`, `json_parser.h`, `rpi_hal.c`, `rpi_hal.h`, and `shared_types.h` are in the same directory or accessible via include paths.
+1.  Python 3 installed.
+2.  libcurl development libraries (e.g., `sudo apt-get install libcurl4-openssl-dev`).
+3.  Ensure all source files (multithread_communication.c, json_parser.c, rpi_hal.c) are present.
 
 **Step 1: Compile the RPI communication module**
+Use the provided Makefile to build the test configuration:
 
-Open your terminal in the `RPI` directory and compile with the `RPI_TESTING` flag defined:
+    make test_center
 
-    gcc -g -Wall -DRPI_TESTING multithread_communication.c json_parser.c rpi_hal.c -o test_center -lpthread -lcurl
-    gcc -g -Wall -DFAKE_ANDROID_SIMULATION multithread_communication.c json_parser.c rpi_hal.c -o STtest_center -lpthread -lcurl
-    gcc -Wall multithread_communication.c json_parser.c rpi_hal.c -o ctrl_center -lpthread -lcurl
-    Make `fake_stm.py` executable:
-        chmod +x fake_stm.py
+This creates an executable `./test_center` with STM32_SIM=1, ANDROID_SIM=1, and RPI_TESTING defined.
 
-*   `-DRPI_TESTING`: Activates the test configuration (e.g., using named pipes for STM/Android and localhost for servers).
-*   `-o test_center`: Specifies the output executable name.
-*   `-lpthread`: Links the POSIX threads library.
-*   `-lcurl`: Links the libcurl library.
+**Step 2: Create Named Pipes (FIFOs)**
+Create the 4 pipes required for bidirectional simulation in the `RPI` directory:
 
-**Step 2: Create Named Pipes (FIFOs) for simulated serial communication**
+    mkfifo rpi_to_stm stm_to_rpi android_to_rpi rpi_to_android
 
-The `RPI_TESTING` configuration uses "rpi_to_stm" and "android_to_rpi" as device paths. These need to be created as named pipes.
-Run these commands in your terminal in the `RPI` directory:
+**Step 3: Run the Fake Servers and STM32 Simulator**
+Open 3 separate terminals for the simulators:
 
-    mkfifo rpi_to_stm
-    mkfifo android_to_rpi
-
-**Step 3: Run the Fake Servers**
-
-Open two SEPARATE terminal windows/tabs, navigate to the `RPI` directory in each, and run the fake servers:
-
-*   **Terminal 1 (Fake Path Server):**
-    ```bash
+*   Terminal 1 (Fake Pathfinding Server):
     python3 fake_path_server.py
-    ```
-    You should see: `Fake Pathfinding Server running on http://localhost:5000 ...`
 
-*   **Terminal 2 (Fake Image Server):**
-    ```bash
+*   Terminal 2 (Fake Image Recognition Server):
     python3 fake_image_server.py
-    ```
-    You should see: `Fake Image Recognition Server running on http://localhost:5000 ...`
 
-*   **Terminal 3 (Fake STM32 Simulation):**
-    ```bash
+*   Terminal 3 (Fake STM32 Simulation):
     python3 fake_stm.py
-    ```
 
-**Step 4: Run the RPI Communication Program**
+*Note: Ensure the URLs in `multithread_communication.c` (PATHFINDING_SERVER_URL, IMAGE_SERVER_URL) 
+point to where these servers are running (e.g., "http://localhost:5000").*
 
-Open a THIRD terminal window/tab, navigate to the `RPI` directory, and run the compiled program:
+**Step 4: Run the RPI Control Centre**
+Open a 4th terminal and run the compiled program:
 
     ./test_center
 
-You should see initialization messages like: `--- RPi Control Centre Initialized ---` and `[AndroidThread] Listening for messages...` and `[NavThread] State: [IDLE]. Waiting for new mission...`
+**Step 5: Simulate Android Input**
+Open a 5th terminal. Send a "sendArena" command as JSON to the `android_to_rpi` pipe.
 
-**Step 5: Simulate Android Input (Trigger Pathfinding and Image Processing)**
+Example Command (Start Mission):
+    echo "{\"cat\": \"sendArena\", \"value\": {\"obstacles\":[{\"x\": 10,\"y\": 10,\"d\": 1,\"id\": 1},{\"x\": 5,\"y\": 15,\"d\": 2,\"id\": 2}],\"robot_x\": 2,\"robot_y\": 2,\"robot_dir\": 1}}" > android_to_rpi
 
-Open a FOURTH terminal window/tab, navigate to the `RPI` directory.
-You will write a "START" command with obstacle data to the `android_to_rpi` named pipe. This simulates the Android app sending a mission.
+Example Command (Direct STM control):
+    echo "{\"cat\": \"stm\", \"value\": \"<FW10>\"}" > android_to_rpi
 
-**Example START Command:**
+Example Command (Stop):
+    echo "{\"cat\": \"stop\"}" > android_to_rpi
 
-```json
-"{"cat": "sendArena", "value": {"obstacles":[{"x": 9,"y": 9,"d": 0,"id": 0},{"x": 9,"y": 10,"d": 0,"id": 0},{"x": 2,"y": 12,"d": 1,"id": 1},{"x": 12,"y": 17,"d": 2,"id": 2},{"x": 11,"y": 4,"d": 4,"id": 3},{"x": 17,"y": 10,"d": 3,"id": 4}],"robot_x": 1,"robot_y": 1,"robot_direction": 1}}"
-```
+*Note: 
+- Coordinates (x, y) are 1-indexed for Android; Directions: 1=N, 2=E, 3=S, 4=W.
+- Category "stm" expects "<CMDVALUE>" format (e.g., <FW10>, <TL90>).*
 
-**To send this command, paste the following into the FOURTH terminal and press Enter:**
-
-    echo "{\"cat\": \"sendArena\", \"value\": {\"obstacles\":[{\"id\":1,\"x\":1,\"y\":2,\"d\":2},{\"id\":2,\"x\":2,\"y\":3,\"d\":0}],\"robot_x\":0,\"robot_y\":0,\"robot_dir\":0,\"retrying\":false}}\\n" > android_to_rpi
-
-*   **Explanation of the Android message format:**
-    *   It starts with `"START`
-    *   The entire JSON payload is enclosed in double quotes.
-    *   `obstacles`: An array of objects, each with `id`, `x`, `y`, `d` (direction).
-    *   `robot_x`, `robot_y`, `robot_dir`: Initial robot position and direction.
-    *   `retrying`: Boolean flag.
-
-**Expected Output in `rpi_comm` terminal (Step 4):**
-
-You should see the RPI program:
-1.  Receive the START message.
-2.  Transition to `STATE_PATHFINDING`.
-3.  Print the pathfinding payload.
-4.  Make a request to `http://localhost:5000/path` (handled by `fake_path_server.py`).
-5.  Receive and parse the route (commands and snap positions).
-6.  Start `execute_navigation()`.
-7.  For each `CMD_SNAPSHOT` command, it will print `--- Spawning image thread for obstacle X ---`.
-8.  The image thread will capture image (simulated), post to `http://localhost:5000/detect` (handled by `fake_image_server.py`), and print the image server's response.
-9.  It will then simulate sending a robot position and image detection result to Android (these messages will be written to `rpi_to_stm`, but since no one is reading from `rpi_to_stm` in this test, you won't see them directly unless you monitor the pipe).
-10. Finally, it will print `"Navigation complete."` and return to `STATE_IDLE`.
-
-**Step 6: Observe STM32 commands (Optional)**
-
-If you want to see what commands are sent to the STM32, open a FIFTH terminal window/tab and run:
-
-    cat rpi_to_stm
-
-This will display the messages that `rpi_comm` sends to the STM32 simulated device. You should see `ACK` messages and command strings (e.g., `:0/FW10;`).
-
-**Step 7: Simulate Android STOP Command**
-
-To simulate stopping the robot mid-navigation (or just sending a stop command while idle), in the FOURTH terminal, type:
-
-    echo "\"STOP\"\\n" > android_to_rpi
-
-The `rpi_comm` program should acknowledge the STOP command. If navigation is in progress, it will abort.
+**Step 6: Observe and Control**
+*   **Monitor STM32 output:** Check Terminal 3 or run `cat rpi_to_stm`.
+*   **Monitor Android feedback:** Run `cat rpi_to_android` in a separate terminal to see status Acks and Image-Rec results sent by the RPi.
 
 **Cleanup:**
-
-*   Press `Ctrl+C` in all terminal windows running the servers and `rpi_comm`.
-*   Remove the named pipes:
-    ```bash
-    rm rpi_to_stm
-    rm android_to_rpi
-    ```
+1.  Press Ctrl+C in all terminals.
+2.  Remove pipes: `rm rpi_to_stm stm_to_rpi android_to_rpi rpi_to_android`
 */

@@ -15,6 +15,7 @@ typedef enum {
     STATE_IDLE,
     STATE_PATHFINDING,
     STATE_NAVIGATING,
+    STATE_TASK2,
     STATE_ERROR
 } SystemState;
 
@@ -37,10 +38,13 @@ typedef struct {
 // Represents a single command in the navigation route.
 typedef enum {
     CMD_MOVE_FORWARD,
-    CMD_MOVE_BACKWARD, // Added for BW command
+    CMD_MOVE_BACKWARD,
     CMD_TURN_LEFT,
     CMD_TURN_RIGHT,
-    CMD_SNAPSHOT
+    CMD_REVERSE_LEFT,
+    CMD_REVERSE_RIGHT,
+    CMD_SNAPSHOT,
+    CMD_FINISH
 } CommandType;
 
 typedef struct {
@@ -82,8 +86,11 @@ typedef struct {
     int snap_position_count; // Number of valid snap positions
     int snap_position_idx;
 
+    time_t mission_start_time; // To track when the mission started
+
     // File descriptors needed by multiple threads
-    int android_fd;
+    int android_fd;       // Used for reading from Android
+    int android_write_fd; // Used for writing to Android
     int stm32_fd;
 
     // STM32 ACK synchronization
@@ -95,6 +102,12 @@ typedef struct {
     volatile uint32_t last_image_capture_id;
     pthread_mutex_t image_capture_mutex;
     pthread_cond_t image_capture_cond;
+
+    // Task 2 specific synchronization
+    bool task2_requested;
+    int task2_snap_obs_id;
+    pthread_mutex_t task2_snap_mutex;
+    pthread_cond_t task2_snap_cond;
 
 } SharedAppContext;
 

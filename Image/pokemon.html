@@ -1,0 +1,655 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pokédex Image Detections</title>
+    <meta name="theme-color" content="#a78bfa">
+    <style>
+        :root {
+            --red: #e63946;
+            --blue: #1d4ed8;
+            --yellow: #fbbf24;
+            --ditto: #a78bfa;
+            --pink: #ec4899;
+            --purple: #a78bfa;
+            --violet: #6366f1;
+            --ink: #0f172a;
+            --muted: rgba(15, 23, 42, 0.72);
+            --card: rgba(255, 255, 255, 0.92);
+            --line: rgba(15, 23, 42, 0.14);
+            --shadow: 0 12px 30px rgba(129, 140, 248, 0.15);
+            --radius: 16px;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+            color: var(--ink);
+            /* Beige/pink at top → bluish purple at bottom */
+            background:
+                radial-gradient(1200px 600px at 10% 15%, rgba(236, 72, 153, 0.18), transparent 55%),
+                radial-gradient(900px 500px at 90% 20%, rgba(99, 102, 241, 0.16), transparent 60%),
+                radial-gradient(800px 500px at 50% 90%, rgba(167, 139, 250, 0.20), transparent 55%),
+                linear-gradient(165deg, #fdf2f8 0%, #f5f3ff 45%, #eef2ff 100%);
+        }
+
+        .page {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 28px 20px 56px;
+        }
+
+        header.hero {
+            position: relative;
+            overflow: hidden;
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            border-radius: calc(var(--radius) + 6px);
+            background: linear-gradient(90deg, #f5ebee 0%, #f8f2f4 40%, #fdfbfc 100%);
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06), 0 2px 6px rgba(0, 0, 0, 0.04);
+            padding: 22px 22px 18px;
+        }
+
+        header.hero::before {
+            content: "";
+            position: absolute;
+            right: -80px;
+            top: -90px;
+            width: 260px;
+            height: 260px;
+            border-radius: 50%;
+            /* Red and white Pokéball background shape */
+            background:
+                radial-gradient(circle at 50% 50%, rgba(255,255,255,0.5) 0 22%, rgba(15, 23, 42, 0.25) 22% 28%, transparent 30%),
+                linear-gradient(180deg, rgba(230, 57, 70, 0.45) 0 46%, rgba(15, 23, 42, 0.35) 46% 54%, rgba(255, 255, 255, 0.55) 54% 100%);
+            box-shadow: inset 0 0 0 8px rgba(15, 23, 42, 0.12);
+            opacity: 0.75;
+            transform: rotate(8deg);
+        }
+
+        header.hero::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background:
+                linear-gradient(180deg, rgba(230,57,70,0.12), rgba(230,57,70,0.00) 50%),
+                linear-gradient(0deg, rgba(29,78,216,0.12), rgba(29,78,216,0.00) 50%);
+            pointer-events: none;
+        }
+
+        .hero-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .title > div {
+            min-width: 0;
+        }
+
+        .ditto-mark {
+            width: 80px;
+            height: 80px;
+            flex: 0 0 auto;
+        }
+
+        .ditto-mark img {
+            display: block;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            object-position: center;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: clamp(22px, 2.2vw, 30px);
+            letter-spacing: 0.2px;
+            line-height: 1.25;
+        }
+
+        .subtitle {
+            margin: 6px 0 0;
+            color: var(--muted);
+            font-size: 14px;
+            max-width: 70ch;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(15, 23, 42, 0.16);
+            background: rgba(255, 255, 255, 0.82);
+            font-size: 13px;
+            color: rgba(15, 23, 42, 0.78);
+            white-space: nowrap;
+            position: relative;
+            z-index: 1;
+        }
+
+        .badge .badge-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            object-fit: contain;
+            flex: 0 0 auto;
+            display: block;
+        }
+
+        .poke-icon {
+            width: 20px;
+            height: 20px;
+            border-radius: 999px;
+            display: inline-block;
+            background:
+                radial-gradient(circle at 50% 52%, #ffffff 0 28%, #0b1220 28% 36%, #ffffff 36% 42%, transparent 42%),
+                linear-gradient(180deg, var(--red) 0 46%, #0b1220 46% 54%, #ffffff 54% 100%);
+            box-shadow:
+                0 10px 16px rgba(2, 6, 23, 0.10),
+                inset 0 0 0 1px rgba(11, 18, 32, 0.22);
+            flex: 0 0 auto;
+        }
+
+        main { margin-top: 22px; }
+
+        h2 {
+            margin: 22px 0 12px;
+            font-size: 16px;
+            letter-spacing: 0.2px;
+            color: rgba(15, 23, 42, 0.86);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        h2::before {
+            content: "";
+            width: 10px;
+            height: 10px;
+            border-radius: 3px;
+            background: linear-gradient(135deg, var(--pink), var(--purple), var(--violet));
+            box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.2);
+        }
+
+        .container {
+            display: grid;
+            /* ~3 images per line on typical viewports */
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 18px;
+        }
+
+        .image-box {
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            padding: 0;
+            background: var(--card);
+            box-shadow: 0 10px 22px rgba(2, 6, 23, 0.10);
+            backdrop-filter: blur(6px);
+            text-align: left;
+            overflow: hidden;
+            transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+        }
+
+        .image-box:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 18px 38px rgba(167, 139, 250, 0.2);
+            border-color: rgba(167, 139, 250, 0.4);
+        }
+
+        .image-box h3 {
+            margin: 0;
+            padding: 10px 12px 8px;
+            font-size: 13px;
+            font-weight: 650;
+            color: rgba(15, 23, 42, 0.92);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            /* Stronger banner contrast vs white card body */
+            background: linear-gradient(135deg, rgba(236, 72, 153, 0.22), rgba(167, 139, 250, 0.28));
+            border-bottom: 2px solid rgba(167, 139, 250, 0.45);
+        }
+
+        .h3-left {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        .filename {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .chip {
+            font-size: 12px;
+            font-weight: 600;
+            color: rgba(15, 23, 42, 0.72);
+            border: 1px solid rgba(15, 23, 42, 0.16);
+            background: rgba(255, 255, 255, 0.85);
+            padding: 4px 8px;
+            border-radius: 999px;
+        }
+
+        .image-box img {
+            width: 100%;
+            height: auto;
+            display: block;
+            margin: 8px 10px 10px;
+            border-radius: 12px;
+            border: 1px solid rgba(15, 23, 42, 0.10);
+            background: #ffffff;
+            cursor: zoom-in;
+        }
+
+        .hint {
+            margin-top: 10px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            color: rgba(15, 23, 42, 0.68);
+            font-size: 13px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .hint kbd {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 12px;
+            padding: 3px 7px;
+            border-radius: 8px;
+            border: 1px solid rgba(15, 23, 42, 0.20);
+            background: rgba(255, 255, 255, 0.78);
+            box-shadow: 0 4px 10px rgba(2, 6, 23, 0.08);
+        }
+
+        /* Lightbox (proof viewer) */
+        .lightbox[hidden] { display: none; }
+
+        .lightbox {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+        }
+
+        .lightbox-backdrop {
+            position: absolute;
+            inset: 0;
+            background: rgba(2, 6, 23, 0.78);
+            backdrop-filter: blur(4px);
+        }
+
+        .lightbox-panel {
+            position: relative;
+            z-index: 1;
+            max-width: min(1100px, calc(100vw - 28px));
+            margin: 22px auto;
+            border-radius: calc(var(--radius) + 6px);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            background: rgba(255, 255, 255, 0.92);
+            box-shadow: 0 24px 60px rgba(2, 6, 23, 0.45);
+            overflow: hidden;
+            display: grid;
+            grid-template-rows: auto 1fr auto;
+            max-height: calc(100vh - 44px);
+        }
+
+        .lightbox-topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(15, 23, 42, 0.12);
+            background: linear-gradient(135deg, rgba(236, 72, 153, 0.08), rgba(167, 139, 250, 0.12), rgba(99, 102, 241, 0.08));
+        }
+
+        .lightbox-title {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .lightbox-title strong {
+            font-size: 14px;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .lightbox-title span {
+            font-size: 12px;
+            color: rgba(15, 23, 42, 0.72);
+        }
+
+        .lightbox-actions {
+            display: inline-flex;
+            gap: 8px;
+            flex: 0 0 auto;
+        }
+
+        .btn {
+            appearance: none;
+            border: 1px solid rgba(15, 23, 42, 0.18);
+            background: rgba(255, 255, 255, 0.86);
+            color: rgba(15, 23, 42, 0.82);
+            border-radius: 12px;
+            padding: 8px 10px;
+            font-size: 13px;
+            font-weight: 650;
+            cursor: pointer;
+            transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 18px rgba(167, 139, 250, 0.22);
+            border-color: rgba(167, 139, 250, 0.45);
+        }
+
+        .btn:active { transform: translateY(0); }
+
+        .btn.primary {
+            background: linear-gradient(180deg, rgba(167, 139, 250, 0.2), rgba(99, 102, 241, 0.12));
+            border-color: rgba(167, 139, 250, 0.5);
+        }
+
+        .lightbox-body {
+            padding: 14px;
+            display: grid;
+            place-items: center;
+            overflow: auto;
+            background: rgba(255, 255, 255, 0.88);
+        }
+
+        .lightbox-body img {
+            cursor: zoom-out;
+            max-width: 100%;
+            max-height: 70vh;
+            width: auto;
+            height: auto;
+            border-radius: 14px;
+            border: 1px solid rgba(15, 23, 42, 0.14);
+            box-shadow: 0 20px 46px rgba(2, 6, 23, 0.25);
+        }
+
+        .lightbox-footer {
+            padding: 12px 14px;
+            border-top: 1px solid rgba(15, 23, 42, 0.12);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            background: rgba(255, 255, 255, 0.92);
+        }
+
+        .lightbox-help {
+            color: rgba(15, 23, 42, 0.64);
+            font-size: 12px;
+        }
+
+        footer {
+            margin-top: 26px;
+            color: rgba(15, 23, 42, 0.60);
+            font-size: 12px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <header class="hero">
+            <div class="hero-top">
+                <div class="title">
+                    <div class="ditto-mark" aria-hidden="true"><img src="./Ditto.png" alt=""></div>
+                    <div>
+                        <h1>Ditto's Image Viewer</h1>
+                        <p class="subtitle">A Ditto-themed gallery for detection results and original snapshots.</p>
+                        <div class="hint">
+                            Click any image to open the proof viewer.
+                        </div>
+                    </div>
+                </div>
+                <div class="badge"><img src="./Ditto.png" alt="" class="badge-icon" aria-hidden="true"> Team Ditto</div>
+            </div>
+        </header>
+
+        <main>
+            <h2>Detections</h2>
+            <div class="container">
+
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">detection_1.jpg</span></span></h3>
+                    <img src="detections/detection_1.jpg" alt="detection_1.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">detection_2.jpg</span></span></h3>
+                    <img src="detections/detection_2.jpg" alt="detection_2.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">detection_3.jpg</span></span></h3>
+                    <img src="detections/detection_3.jpg" alt="detection_3.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">detection_4.jpg</span></span></h3>
+                    <img src="detections/detection_4.jpg" alt="detection_4.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">detection_5.jpg</span></span></h3>
+                    <img src="detections/detection_5.jpg" alt="detection_5.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">detection_6.jpg</span></span></h3>
+                    <img src="detections/detection_6.jpg" alt="detection_6.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">detection_7.jpg</span></span></h3>
+                    <img src="detections/detection_7.jpg" alt="detection_7.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">detection_8.jpg</span></span></h3>
+                    <img src="detections/detection_8.jpg" alt="detection_8.jpg">
+                </div>
+            </div>
+            <h2>Originals</h2>
+            <div class="container">
+
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">original_detection_1.jpg</span></span><span class="chip">Original</span></h3>
+                    <img src="detections/original_detection_1.jpg" alt="original_detection_1.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">original_detection_2.jpg</span></span><span class="chip">Original</span></h3>
+                    <img src="detections/original_detection_2.jpg" alt="original_detection_2.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">original_detection_3.jpg</span></span><span class="chip">Original</span></h3>
+                    <img src="detections/original_detection_3.jpg" alt="original_detection_3.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">original_detection_4.jpg</span></span><span class="chip">Original</span></h3>
+                    <img src="detections/original_detection_4.jpg" alt="original_detection_4.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">original_detection_5.jpg</span></span><span class="chip">Original</span></h3>
+                    <img src="detections/original_detection_5.jpg" alt="original_detection_5.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">original_detection_6.jpg</span></span><span class="chip">Original</span></h3>
+                    <img src="detections/original_detection_6.jpg" alt="original_detection_6.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">original_detection_7.jpg</span></span><span class="chip">Original</span></h3>
+                    <img src="detections/original_detection_7.jpg" alt="original_detection_7.jpg">
+                </div>
+                <div class="image-box">
+                    <h3><span class="h3-left"><span class="poke-icon" aria-hidden="true"></span><span class="filename">original_detection_8.jpg</span></span><span class="chip">Original</span></h3>
+                    <img src="detections/original_detection_8.jpg" alt="original_detection_8.jpg">
+                </div>
+            </div>
+            <footer>Pokédex theme applied to <code>pokemon.html</code> only.</footer>
+        </main>
+    </div>
+
+    <div class="lightbox" id="lightbox" hidden aria-hidden="true">
+        <div class="lightbox-backdrop" data-close="true"></div>
+        <div class="lightbox-panel" role="dialog" aria-modal="true" aria-label="Proof image viewer">
+            <div class="lightbox-topbar">
+                <div class="lightbox-title">
+                    <strong id="lightboxFilename">—</strong>
+                    <span id="lightboxMeta">—</span>
+                </div>
+                <div class="lightbox-actions">
+                    <button class="btn" type="button" id="prevBtn" aria-label="Previous image">Prev</button>
+                    <button class="btn primary" type="button" id="nextBtn" aria-label="Next image">Next</button>
+                    <button class="btn" type="button" id="closeBtn" aria-label="Close viewer">X</button>
+                </div>
+            </div>
+            <div class="lightbox-body">
+                <img id="lightboxImg" src="" alt="">
+            </div>
+            <div class="lightbox-footer">
+                <div class="lightbox-help">Tip: click the dark background to close.</div>
+                <div class="lightbox-help" id="lightboxCount">0 / 0</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            const cards = Array.from(document.querySelectorAll(".image-box"));
+
+            const items = cards.map((card) => {
+                const img = card.querySelector("img");
+                const filenameEl = card.querySelector(".filename");
+                const container = card.parentElement;
+                const sectionHeading = container?.previousElementSibling;
+                const section = sectionHeading && sectionHeading.tagName === "H2"
+                    ? sectionHeading.textContent?.trim()
+                    : "";
+                return {
+                    src: img?.getAttribute("src") || "",
+                    alt: img?.getAttribute("alt") || "",
+                    title: (filenameEl?.textContent || "").replace(/\s+/g, " ").trim(),
+                    section: section || "",
+                };
+            }).filter((x) => x.src);
+
+            const lightbox = document.getElementById("lightbox");
+            const lbImg = document.getElementById("lightboxImg");
+            const lbFilename = document.getElementById("lightboxFilename");
+            const lbMeta = document.getElementById("lightboxMeta");
+            const lbCount = document.getElementById("lightboxCount");
+            const prevBtn = document.getElementById("prevBtn");
+            const nextBtn = document.getElementById("nextBtn");
+            const closeBtn = document.getElementById("closeBtn");
+
+            if (!lightbox || !lbImg || !lbFilename || !lbMeta || !lbCount || !prevBtn || !nextBtn || !closeBtn) return;
+
+            let index = 0;
+            let lastActive = null;
+
+            function setHidden(hidden) {
+                if (hidden) {
+                    lightbox.setAttribute("hidden", "");
+                    lightbox.setAttribute("aria-hidden", "true");
+                } else {
+                    lightbox.removeAttribute("hidden");
+                    lightbox.setAttribute("aria-hidden", "false");
+                }
+            }
+
+            function render() {
+                const item = items[index];
+                if (!item) return;
+                lbImg.src = item.src;
+                lbImg.alt = item.alt || item.title || "Image";
+                lbFilename.textContent = item.alt || item.title || item.src;
+                lbMeta.textContent = item.section ? item.section : "Gallery";
+                lbCount.textContent = `${index + 1} / ${items.length}`;
+                prevBtn.disabled = items.length <= 1;
+                nextBtn.disabled = items.length <= 1;
+            }
+
+            function openAt(i, activeEl) {
+                if (!items.length) return;
+                index = (i + items.length) % items.length;
+                lastActive = activeEl || null;
+                setHidden(false);
+                render();
+                closeBtn.focus();
+                document.body.style.overflow = "hidden";
+            }
+
+            function close() {
+                setHidden(true);
+                document.body.style.overflow = "";
+                if (lastActive && typeof lastActive.focus === "function") lastActive.focus();
+            }
+
+            function prev() {
+                index = (index - 1 + items.length) % items.length;
+                render();
+            }
+
+            function next() {
+                index = (index + 1) % items.length;
+                render();
+            }
+
+            cards.forEach((card, i) => {
+                const img = card.querySelector("img");
+                if (!img) return;
+                img.tabIndex = 0;
+                img.addEventListener("click", () => openAt(i, img));
+                img.addEventListener("keydown", (e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openAt(i, img);
+                    }
+                });
+            });
+
+            prevBtn.addEventListener("click", prev);
+            nextBtn.addEventListener("click", next);
+            closeBtn.addEventListener("click", close);
+            lbImg.addEventListener("click", close);
+
+            lightbox.addEventListener("click", (e) => {
+                const t = e.target;
+                if (t && t.getAttribute && t.getAttribute("data-close") === "true") close();
+            });
+
+            window.addEventListener("keydown", (e) => {
+                if (lightbox.hasAttribute("hidden")) return;
+                if (e.key === "Escape") return close();
+                if (e.key === "ArrowLeft") return prev();
+                if (e.key === "ArrowRight") return next();
+            });
+        })();
+    </script>
+
+</body>
+</html>

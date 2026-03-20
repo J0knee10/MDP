@@ -11,10 +11,20 @@
 // Helper function to find a key and return a pointer to its value start
 static const char* find_json_value(const char* json, const char* key) {
     char search_key[JSON_MAX_FIELD_LEN];
-    snprintf(search_key, sizeof(search_key), "\"%s\":", key);
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
     const char* key_pos = strstr(json, search_key);
     if (!key_pos) return NULL;
-    return key_pos + strlen(search_key);
+    
+    const char* p = key_pos + strlen(search_key);
+    // Skip whitespace after key
+    while (*p && isspace((unsigned char)*p)) p++;
+    // Must be a colon
+    if (*p != ':') return NULL;
+    p++;
+    // Skip whitespace after colon
+    while (*p && isspace((unsigned char)*p)) p++;
+    
+    return p;
 }
 
 // Function to extract an integer value from a JSON string for a given key
@@ -59,15 +69,27 @@ int get_json_string(const char *json_string, const char *key, char *value_buffer
 
 // Helper for parsing a single obstacle object
 static int parse_single_obstacle(const char* obs_str, Obstacle* obstacle) {
+    int android_d = -1;
+    int raw_x = -1, raw_y = -1;
     if (get_json_int(obs_str, "id", &obstacle->id) == 0 &&
-        get_json_int(obs_str, "x", &obstacle->x) == 0 &&
-        get_json_int(obs_str, "y", &obstacle->y) == 0 &&
-        get_json_int(obs_str, "d", &obstacle->d) == 0) { // Expect 'd' as integer
-
-        // Adjust coordinates from Android's 1-indexed to RPi's 0-indexed
-        obstacle->x -= 1;
-        obstacle->y -= 1;
-
+        get_json_int(obs_str, "x", &raw_x) == 0 &&
+        get_json_int(obs_str, "y", &raw_y) == 0 &&
+        get_json_int(obs_str, "d", &android_d) == 0) {
+        
+        // Convert to 0-indexed, the grid is same for both but Android is tracking the bottom-left corner while RPi tracks the center. Since obstacles are 1x1, we can keep the same coordinates for simplicity.
+        // obstacle->x = raw_x - 1;
+        // obstacle->y = raw_y - 1;
+        obstacle->x = raw_x;
+        obstacle->y = raw_y;
+            
+        // Map Android's 1=N, 2=E, 3=S, 4=W to RPi's 0,2,4,6
+        switch (android_d) {
+            case 1: obstacle->d = 0; break; // North
+            case 2: obstacle->d = 2; break; // East
+            case 3: obstacle->d = 4; break; // South
+            case 4: obstacle->d = 6; break; // West
+            default: obstacle->d = 0; break; // Default to North
+        }
         return 0; // Success
     }
     return -1; // Failure
@@ -108,8 +130,8 @@ int parse_android_map_json(const char* json_string, SharedAppContext* context) {
     }
 
     // Parse robot_x, robot_y, robot_direction
-    int robot_x_val = 1; // Default to 1 (0-indexed)
-    int robot_y_val = 1; // Default to 1 (0-indexed)
+    int robot_x_val = 0; // Default to 1 (0-indexed)
+    int robot_y_val = 0; // Default to 1 (0-indexed)
     int robot_dir_val = 0; // Default to 0 (North)
 
     if (get_json_int(json_string, "robot_x", &robot_x_val) != 0) {
@@ -120,7 +142,8 @@ int parse_android_map_json(const char* json_string, SharedAppContext* context) {
     }
 
     int android_dir = 0;
-    if (get_json_int(json_string, "robot_dir", &android_dir) == 0) {
+    if (get_json_int(json_string, "robot_dir", &android_dir) == 0 || 
+        get_json_int(json_string, "robot_direction", &android_dir) == 0) {
         // Map Android's 1=N, 2=E, 3=S, 4=W to RPi's 0,2,4,6
         switch (android_dir) {
             case 1: robot_dir_val = 0; break; // North
@@ -133,9 +156,9 @@ int parse_android_map_json(const char* json_string, SharedAppContext* context) {
         fprintf(stderr, "Could not parse robot_dir, using default.\n");
     }
 
-    // Adjust coordinates from Android's 1-indexed to RPi's 0-indexed
-    context->robot_start_x = robot_x_val - 1;
-    context->robot_start_y = robot_y_val - 1;
+    // Add 1 as android tracks bottom-left corner and RPi tracks center.
+    context->robot_start_x = robot_x_val + 1;
+    context->robot_start_y = robot_y_val + 1;
     context->robot_start_dir = robot_dir_val;
 
     return 0; // Success
@@ -155,9 +178,21 @@ static int parse_single_command_string(const char* cmd_str, Command* command) {
     } else if (strncmp(cmd_str, "FR", 2) == 0) {
         command->type = CMD_TURN_RIGHT;
         command->value = atoi(cmd_str + 2); // Assuming angle like 90
+    } else if (strncmp(cmd_str, "BL", 2) == 0) {
+        command->type = CMD_REVERSE_LEFT;
+        command->value = atoi(cmd_str + 2);
+    } else if (strncmp(cmd_str, "BR", 2) == 0) {
+        command->type = CMD_REVERSE_RIGHT;
+        command->value = atoi(cmd_str + 2);
     } else if (strncmp(cmd_str, "SP", 2) == 0) {
         command->type = CMD_SNAPSHOT;
         command->value = atoi(cmd_str + 2); // Obstacle ID
+    } else if (strncmp(cmd_str, "SNAP", 4) == 0) {
+        command->type = CMD_SNAPSHOT;
+        command->value = atoi(cmd_str + 4); // Obstacle ID
+    } else if (strcmp(cmd_str, "FIN") == 0) {
+        command->type = CMD_FINISH;
+        command->value = 0;
     } else {
         fprintf(stderr, "Unknown command type: %s\n", cmd_str);
         return -1; // Unknown command

@@ -1,6 +1,33 @@
-# Build artifacts
+# Gradle files
+.gradle/
+build/
+**/build/
+
+# IDE files (Android Studio / IntelliJ)
+.idea/
+*.iml
+local.properties
+.navigation/
+
+# Output and Captures
+captures/
+*.log
+.externalNativeBuild/
+.cxx/
+*.jpg
+*.jpeg
+
+# System files
+.DS_Store
+Thumbs.db
+
+# User-specific
+.attach_pid*
+
+# =========================
+# Embedded Build Artifacts
+# =========================
 *.bin
-*.exe
 *.elf
 *.hex
 *.axf
@@ -14,12 +41,27 @@
 *.crf
 *.htm
 
-# Logs / media
+Debug/
+Release/
+
+# =========================
+# Logs / Media
+# =========================
 *.log
 *.mp4
 
-# IDE / editor
+# =========================
+# IDE
+# =========================
+.metadata/
 .vscode/
 
+# =========================
 # Python
+# =========================
 .venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.python-version

@@ -60,6 +60,11 @@ static int write_to_serial(int fd, const char* message) {
         perror("write_to_serial: Failed to write");
         return -1;
     }
+    
+    // Ensure all data is physically transmitted before returning
+    // Only applies to real serial devices, not named pipes
+    tcdrain(fd); 
+    
     return 0;
 }
 
@@ -91,14 +96,15 @@ int init_serial_port(const char* device, int baud_rate) {
         return -1;
     }
 
-#ifdef RPI_TESTING
-    // For named pipes, termios settings are not applicable.
-    // We just need the file descriptor.
-    fcntl(fd, F_SETFL, 0); // Ensure blocking write for named pipes
-    printf("Named pipe %s opened successfully for testing.\n", device);
-    return fd;
-#else
-    // For real serial ports, apply termios settings
+    // Check if it's a real device (starts with /dev/) or a pipe
+    if (strncmp(device, "/dev/", 5) != 0) {
+        // For named pipes, termios settings are not applicable.
+        fcntl(fd, F_SETFL, 0); // Ensure blocking mode
+        printf("Named pipe %s opened successfully.\n", device);
+        return fd;
+    }
+
+    // For real serial devices, apply termios settings
     fcntl(fd, F_SETFL, 0); // Set to blocking mode
 
     struct termios options;
@@ -118,7 +124,15 @@ int init_serial_port(const char* device, int baud_rate) {
     options.c_cflag |= CS8;
     options.c_cflag &= ~PARENB;
     options.c_cflag &= ~CSTOPB;
-    options.c_lflag |= ICANON; // Use canonical mode to read line by line
+    options.c_cflag &= ~CRTSCTS; // Disable hardware flow control
+    
+    // Set raw mode: disable canonical processing, echoing, and signals
+    options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+    // Disable software flow control
+    options.c_iflag &= ~(IXON | IXOFF | IXANY);
+    // Disable output processing
+    options.c_oflag &= ~OPOST;
+
     options.c_cc[VMIN] = 1;
     options.c_cc[VTIME] = 0;
 
@@ -127,16 +141,67 @@ int init_serial_port(const char* device, int baud_rate) {
 
     printf("Serial port %s initialized successfully.\n", device);
     return fd;
-#endif
+}
+
+int flush_serial_port(int fd) {
+    if (fd == -1) return -1;
+    
+    // Standard system flush (effective for hardware serial)
+    tcflush(fd, TCIOFLUSH); 
+
+    // Manual drain for pipes and as extra safety for hardware
+    // Temporarily set to non-blocking to clear the buffer
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    
+    char junk[1024];
+    while (read(fd, junk, sizeof(junk)) > 0) {
+        // Just draining the buffer
+    }
+    
+    // Restore original blocking/non-blocking state
+    fcntl(fd, F_SETFL, flags);
+    
+    return 0;
 }
 
 // --- Android Communication ---
 
-int send_status_to_android(int fd, const char* status) {
-    char buffer[256];
-    // Format: {"type": "status", "value": "\"message\""}\n (message itself is quoted)
-    snprintf(buffer, sizeof(buffer), "{\"type\": \"status\", \"value\": \"%s\"}\n", status);
-    return write_to_serial(fd, buffer);
+// Unified function to send JSON to Android. If is_object is true, value is treated as a raw JSON object; otherwise it's quoted as a string.
+int send_android_json(int fd, const char* cat, const char* value, bool is_object) {
+    char message[2048];
+    if (is_object) {
+        snprintf(message, sizeof(message), "{\"cat\": \"%s\", \"value\": %s}\n", cat, value);
+    } else {
+        snprintf(message, sizeof(message), "{\"cat\": \"%s\", \"value\": \"%s\"}\n", cat, value);
+    }
+    return send_message_to_android_with_ack(fd, message);
+}
+
+// Wrapper: Sends {"cat": "status", "value": "status_message"}
+int send_android_ack(int fd, const char* status_message) {
+    return send_android_json(fd, "status", status_message, false);
+}
+
+// Wrapper: Sends {"cat": "obstacle", "value": {"x": "x", "y": "y", "d": "d", "image-id": "id", "obstacle-id": "id"}}
+int send_image_recognition_to_android(int fd, int x, int y, const char* d, int image_id, int obstacle_id) {
+    char obj_buffer[512];
+    char image_id_str[20];
+
+    // Harmonize with Android logic: ID 41 is "marker" (Bullseye)
+    if (image_id == 41) {
+        strcpy(image_id_str, "marker");
+    } else {
+        snprintf(image_id_str, sizeof(image_id_str), "%d", image_id);
+    }
+
+    // Send back coordinates for Android's view
+    snprintf(obj_buffer, sizeof(obj_buffer), 
+             "{\"x\": \"%d\", \"y\": \"%d\", \"d\": \"%s\", \"image-id\": \"%s\", \"obstacle-id\": \"%d\"}",
+             x, y, d, image_id_str, obstacle_id);
+    
+    // Use category "image-rec" as requested
+    return send_android_json(fd, "image-rec", obj_buffer, true);
 }
 
 // New function: Sends a message to Android with retries (mimics Python's send_with_ack)
@@ -144,36 +209,12 @@ int send_message_to_android_with_ack(int fd, const char* message) {
     for (int attempt = 0; attempt < ANDROID_COMM_MAX_RETRIES; attempt++) {
         printf("[AndroidComm] Attempt %d: Sending %s", attempt + 1, message);
         if (write_to_serial(fd, message) == 0) {
-            // For now, we assume success after writing.
-            // A full ACK mechanism would involve reading from 'fd' for a response.
             return 0; // Success
         }
         usleep(ANDROID_COMM_RETRY_DELAY_US); // Delay before retry
     }
     fprintf(stderr, "[AndroidComm] Failed to send message after %d attempts: %s", ANDROID_COMM_MAX_RETRIES, message);
     return -1; // Failure
-}
-
-
-// New function: send_target_result_to_android (replaces old send_image_result_to_android)
-int send_target_result_to_android(int fd, int obstacle_id, int recognized_image_id) {
-    char buffer[256];
-    char json_buffer[512]; // Buffer to hold the full JSON string
-    // Python format: resp = "TARGET," + str(object_id) + "," + str(class_name)
-    // Then json.dumps(resp) + "\n"
-    snprintf(buffer, sizeof(buffer), "TARGET,%d,%d", obstacle_id, recognized_image_id);
-    snprintf(json_buffer, sizeof(json_buffer), "\"%s\"\n", buffer); // Enclose in quotes and add newline
-
-    return send_message_to_android_with_ack(fd, json_buffer);
-}
-
-// New function to send standardized ACK messages to Android
-int send_android_ack(int fd, const char* original_cat, const char* status_message) {
-    char json_ack_buffer[512];
-    // Format: {"cat": "original_cat_value", "status": "status_message_value"}\n
-    snprintf(json_ack_buffer, sizeof(json_ack_buffer), "{\"cat\": \"%s\", \"status\": \"%s\"}\n", original_cat, status_message);
-    printf("[AndroidComm] Sending ACK: %s", json_ack_buffer);
-    return write_to_serial(fd, json_ack_buffer);
 }
 
 // New function: parse_android_map_and_obstacles (replaces old parse_obstacle_map_from_android)
@@ -185,6 +226,7 @@ int parse_android_map_and_obstacles(const char* json_string, SharedAppContext* c
 int parse_and_execute_android_command(int stm32_fd, const char* android_command_str, SharedAppContext* context) {
     printf("[RPI_HAL] Received Android command for STM: %s\n", android_command_str);
     char command_type_str[5]; // e.g., "FW", "BW", "FL", "FR", "TL", "TR"
+    char clean_command_content[50] = {0};
     int value = 0;
     Command cmd;
     int parse_success = -1;
@@ -195,7 +237,6 @@ int parse_and_execute_android_command(int stm32_fd, const char* android_command_
         start_ptr++; // Move past '<'
         char *end_ptr = strchr(start_ptr, '>');
         if (end_ptr) {
-            char clean_command_content[50];
             size_t len = end_ptr - start_ptr;
             if (len >= sizeof(clean_command_content)) {
                 fprintf(stderr, "[RPI_HAL] Android command content too long.\n");
@@ -205,8 +246,8 @@ int parse_and_execute_android_command(int stm32_fd, const char* android_command_
             clean_command_content[len] = '\0';
 
             // Parse command type and value
-            if (sscanf(clean_command_content, "%2s%d", command_type_str, &value) == 2) { // Read 2 chars for type, then int for value
-                command_type_str[2] = '\0'; // Ensure null termination for type string
+            if (sscanf(clean_command_content, "%2s%d", command_type_str, &value) >= 1) { 
+                command_type_str[2] = '\0'; // Ensure null termination
 
                 if (strcmp(command_type_str, "FW") == 0) {
                     cmd.type = CMD_MOVE_FORWARD;
@@ -216,23 +257,25 @@ int parse_and_execute_android_command(int stm32_fd, const char* android_command_
                     cmd.type = CMD_MOVE_BACKWARD;
                     cmd.value = value;
                     parse_success = 0;
-                } else if (strcmp(command_type_str, "TL") == 0) {
+                } else if (strcmp(command_type_str, "TL") == 0 || strcmp(command_type_str, "FL") == 0) {
                     cmd.type = CMD_TURN_LEFT;
                     cmd.value = value;
                     parse_success = 0;
-                } else if (strcmp(command_type_str, "TR") == 0) {
+                } else if (strcmp(command_type_str, "TR") == 0 || strcmp(command_type_str, "FR") == 0) {
                     cmd.type = CMD_TURN_RIGHT;
                     cmd.value = value;
                     parse_success = 0;
-                } else if (strcmp(command_type_str, "FL") == 0) {
-                    // For "Forward Left" - currently mapped to TURN_LEFT
-                    cmd.type = CMD_TURN_LEFT; // Assuming turn in place for now
+                } else if (strcmp(command_type_str, "BL") == 0) {
+                    cmd.type = CMD_REVERSE_LEFT;
                     cmd.value = value;
                     parse_success = 0;
-                } else if (strcmp(command_type_str, "FR") == 0) {
-                    // For "Forward Right" - currently mapped to TURN_RIGHT
-                    cmd.type = CMD_TURN_RIGHT; // Assuming turn in place for now
+                } else if (strcmp(command_type_str, "BR") == 0) {
+                    cmd.type = CMD_REVERSE_RIGHT;
                     cmd.value = value;
+                    parse_success = 0;
+                } else if (strcmp(command_type_str, "FIN") == 0) {
+                    cmd.type = CMD_FINISH;
+                    cmd.value = 0;
                     parse_success = 0;
                 } else {
                     fprintf(stderr, "[RPI_HAL] Unrecognized command type: %s\n", command_type_str);
@@ -276,6 +319,10 @@ int parse_and_execute_android_command(int stm32_fd, const char* android_command_
 
             if (ack_result == 0 && context->stm32_last_ack_id == expected_cmd_id) {
                 printf("[RPI_HAL] Received ACK for direct command %u.\n", expected_cmd_id);
+                // Notify Android so the UI icon moves
+                char status_msg[100];
+                snprintf(status_msg, sizeof(status_msg), "STM completed %s", clean_command_content);
+                send_android_ack(context->android_write_fd, status_msg);
             }
             pthread_mutex_unlock(&context->stm32_ack_mutex);
         } else {
@@ -347,8 +394,8 @@ int parse_command_route_from_server(const char* json_string, Command commands[],
 uint32_t send_command_to_stm32(int fd, Command command, uint32_t external_cmd_id) {
     char stm_command[128];
     static uint32_t internal_cmd_id_counter = 0; // Static to maintain ID across calls
-    const int DEFAULT_MOVE_SPEED_PERCENTAGE = 70; // 70% speed
-    const int DEFAULT_TURN_SPEED_PERCENTAGE = 60; // 60% speed
+    const int DEFAULT_MOVE_SPEED_PERCENTAGE = 40; // 50% speed
+    const int DEFAULT_TURN_SPEED_PERCENTAGE = 90; // 60% speed
 
     uint32_t cmd_id_to_use;
     if (external_cmd_id != 0) {
@@ -370,25 +417,40 @@ uint32_t send_command_to_stm32(int fd, Command command, uint32_t external_cmd_id
             write_result = write_to_serial(fd, stm_command);
             break;
         case CMD_MOVE_BACKWARD: // Added for BW command
-            // STM32 format: :<cmdid>/MOTOR/BWD/<param1Speed>/<param2DistAngle>;
-            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/BWD/%d/%d;",
+            // STM32 format: :<cmdid>/MOTOR/REVS/<param1Speed>/<param2DistAngle>;
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/REVS/%d/%d;",
                      cmd_id_to_use, DEFAULT_MOVE_SPEED_PERCENTAGE, command.value);
             write_result = write_to_serial(fd, stm_command);
             break;
         case CMD_TURN_LEFT:
             // STM32 format: :<cmdid>/MOTOR/TURNL/<param1Speed>/<param2DistAngle>;
-            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNL/%d/%d;",
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURN90L/%d/%d;",
                      cmd_id_to_use, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             write_result = write_to_serial(fd, stm_command);
             break;
         case CMD_TURN_RIGHT:
             // STM32 format: :<cmdid>/MOTOR/TURNR/<param1Speed>/<param2DistAngle>;
-            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURNR/%d/%d;",
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/TURN90R/%d/%d;",
+                     cmd_id_to_use, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
+            write_result = write_to_serial(fd, stm_command);
+            break;
+        case CMD_REVERSE_LEFT:
+            // STM32 format: :<cmdid>/MOTOR/REVL/<param1Speed>/<param2DistAngle>;
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/REVL/%d/%d;",
+                     cmd_id_to_use, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
+            write_result = write_to_serial(fd, stm_command);
+            break;
+        case CMD_REVERSE_RIGHT:
+            // STM32 format: :<cmdid>/MOTOR/REVR/<param1Speed>/<param2DistAngle>;
+            snprintf(stm_command, sizeof(stm_command), ":%u/MOTOR/REVR/%d/%d;",
                      cmd_id_to_use, DEFAULT_TURN_SPEED_PERCENTAGE, command.value);
             write_result = write_to_serial(fd, stm_command);
             break;
         case CMD_SNAPSHOT:
             printf("[To STM32]: Skipping snapshot command (handled by RPi).\n");
+            return 0; // Indicate no STM command was sent
+        case CMD_FINISH:
+            printf("[To STM32]: Skipping FINISH command (handled by RPi).\n");
             return 0; // Indicate no STM command was sent
         default:
             fprintf(stderr, "send_command_to_stm32: Unknown command type (%d)\n", command.type);

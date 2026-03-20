@@ -19,19 +19,26 @@ struct MemoryStruct {
 
 // --- Initialization ---
 int init_serial_port(const char* device, int baud_rate);
+int flush_serial_port(int fd);
 
 // --- Android Communication ---
-int send_status_to_android(int fd, const char* status);
-// Changed from send_image_result_to_android to reflect "TARGET" command in Python
-int send_target_result_to_android(int fd, int obstacle_id, int recognized_image_id);
+// Unified function to send JSON to Android. If is_object is true, value is treated as a raw JSON object; otherwise it's quoted as a string.
+int send_android_json(int fd, const char* cat, const char* value, bool is_object);
+
+// Wrapper: Sends {"cat": "status", "value": "status_message"}
+int send_android_ack(int fd, const char* status_message);
+
+// Wrapper: Sends {"cat": "image-rec", "value": {...}}
+int send_image_recognition_to_android(int fd, int x, int y, const char* d, int image_id, int obstacle_id);
+
+// Low-level function for sending messages with retries
+int send_message_to_android_with_ack(int fd, const char* message);
+
 // New function to parse the full Android JSON, including obstacles with 'd' and robot start position
 int parse_android_map_and_obstacles(const char* json_string, SharedAppContext* context);
+
 // New function to parse and execute direct STM commands from Android
 int parse_and_execute_android_command(int stm32_fd, const char* android_command_str, SharedAppContext* context);
-// New function for sending messages to Android with acknowledgment/retries
-int send_message_to_android_with_ack(int fd, const char* message);
-// New function to send standardized ACK messages to Android
-int send_android_ack(int fd, const char* original_cat, const char* status_message);
 
 // --- PC/Server Communication ---
 int post_data_to_server(const char* url, const char* payload, char* response_buffer, int buffer_size);

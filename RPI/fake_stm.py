@@ -4,7 +4,7 @@ import re
 
 RPI_TO_STM_PIPE = "rpi_to_stm"  # RPi -> FakeSTM
 STM_TO_RPI_PIPE = "stm_to_rpi"  # FakeSTM -> RPi
-ACK_DELAY_SECONDS = 1
+ACK_DELAY_SECONDS = 2
 
 def run_fake_stm():
     """
@@ -17,21 +17,21 @@ def run_fake_stm():
     for pipe_name in [RPI_TO_STM_PIPE, STM_TO_RPI_PIPE]:
         if not os.path.exists(pipe_name):
             os.mkfifo(pipe_name)
-            print(f"Fake STM32: Created named pipe '{pipe_name}'")
+            print("Fake STM32: Created named pipe '{}'".format(pipe_name))
 
     try:
         # Open the command pipe for reading. This will block until the C program opens it for writing.
-        print(f"Fake STM32: Opening '{RPI_TO_STM_PIPE}' for reading commands...")
+        print("Fake STM32: Opening '{}' for reading commands...".format(RPI_TO_STM_PIPE))
         read_fd = os.open(RPI_TO_STM_PIPE, os.O_RDONLY)
         print("Fake STM32: Command pipe opened.")
 
         # Open the ACK pipe for writing. This will block until the C program opens it for reading.
-        print(f"Fake STM32: Opening '{STM_TO_RPI_PIPE}' for writing ACKs...")
+        print("Fake STM32: Opening '{}' for writing ACKs...".format(STM_TO_RPI_PIPE))
         write_fd = os.open(STM_TO_RPI_PIPE, os.O_WRONLY)
         print("Fake STM32: ACK pipe opened. Ready for communication.")
 
     except Exception as e:
-        print(f"Fake STM32: Error opening pipes: {e}")
+        print("Fake STM32: Error opening pipes: {}".format(e))
         print("Ensure the main C program is started and attempts to open both pipes.")
         return
 
@@ -57,26 +57,26 @@ def run_fake_stm():
                 if not message_str:
                     continue
 
-                print(f"Fake STM32: Received command: '{message_str};'")
+                print("Fake STM32: Received command: '{};'".format(message_str))
 
                 if message.startswith(b':'):
                     match = cmd_pattern.match(message)
                     if match:
                         cmd_id = int(match.group(1))
-                        print(f"Fake STM32: Simulating processing for command ID {cmd_id}...")
+                        print("Fake STM32: Simulating processing for command ID {}...".format(cmd_id))
                         time.sleep(ACK_DELAY_SECONDS)
 
-                        ack_message = f"!{cmd_id}/DONE;\n".encode('utf-8')
+                        ack_message = "!{}/DONE;\n".format(cmd_id).encode('utf-8')
                         
                         # Write the ACK to the dedicated ACK pipe
                         os.write(write_fd, ack_message)
-                        print(f"Fake STM32: Sent ACK: '{ack_message.decode('utf-8').strip()}'")
+                        print("Fake STM32: Sent ACK: '{}'".format(ack_message.decode('utf-8').strip()))
                     else:
-                        print(f"Fake STM32: Unrecognized command format: '{message_str};'")
+                        print("Fake STM32: Unrecognized command format: '{};'".format(message_str))
                 else:
-                    print(f"Fake STM32: (Ignoring non-command data): '{message_str};'")
+                    print("Fake STM32: (Ignoring non-command data): '{};'".format(message_str))
     except Exception as e:
-        print(f"Fake STM32: An unexpected error occurred: {e}")
+        print("Fake STM32: An unexpected error occurred: {}".format(e))
     finally:
         print("Fake STM32: Shutting down.")
         os.close(read_fd)

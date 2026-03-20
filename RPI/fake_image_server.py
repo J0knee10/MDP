@@ -28,23 +28,33 @@ class FakeImageServer(BaseHTTPRequestHandler):
             
             try:
                 obstacle_id = int(obstacle_id_str)
-                img_id = obstacle_id + 10 # Create a unique img_id based on obstacle_id
+                # Map typical classes for simulation
+                if obstacle_id == 41:
+                    class_label = "Bullseye"
+                    img_id = 41
+                else:
+                    class_label = f"Number {obstacle_id}"
+                    img_id = 10 + obstacle_id # Simple mapping for simulation
             except ValueError:
+                class_label = "Unknown"
                 img_id = -1
 
-            # Return the FULL detection response, as requested for testing the C parser.
-            # Note: The C parser is expected to fail on this, but this is for validation.
+            # Match the format in Image/object_detection_server.py
             response_data = {
                 "success": True,
+                "detected": True,
                 "count": 1,
                 "objects": [
                     {
-                        "class_label": f"test_object_{obstacle_id_str}",
+                        "class": f"{class_label} - {img_id}",
+                        "class_label": class_label,
+                        "class_id": str(img_id),
                         "img_id": img_id,
-                        "confidence": 0.95,
-                        "bbox": [10, 20, 30, 40]
+                        "confidence": 0.98,
+                        "bbox": [50.0, 50.0, 150.0, 150.0]
                     }
-                ]
+                ],
+                "saved_path": f"./detections/detection_{obstacle_id_str}.jpg"
             }
             
             # Create a compact JSON string without indentation.
